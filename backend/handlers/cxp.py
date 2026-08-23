@@ -241,21 +241,21 @@ async def apply_level_permissions(bot, chat_id: int, user_id: int, level: int):
 
 def _get_member_tag_string(level: int) -> str:
     if level >= 60:
-        return "Zero-Day Broker"
+        return "Pure Symmetry"
     elif level >= 50:
-        return "Whale Hunter"
+        return "Very Symmetrical"
     elif level >= 40:
-        return "Clean Splicer"
+        return "Supersymmetric"
     elif level >= 30:
-        return "Ledger Forger"
+        return "Exquisitely Symmetrical"
     elif level >= 20:
-        return "Dirty Phreak"
+        return "Crystalline Order"
     elif level >= 10:
-        return "True Operator"
+        return "Rotational Harmony"
     elif level >= 5:
-        return "Hash Cracker"
+        return "Bilateral Balance"
     elif level >= 1:
-        return "Script Kiddie"
+        return "Budding Symmetry"
     return ""
 
 

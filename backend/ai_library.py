@@ -42,7 +42,7 @@ SYMM_CITY_KNOWLEDGE = """
 **symm.city Bot Features:**
 - **AI Assistant (/ask <question>)**: Ask questions about symm, his projects, game development, music, thoughts from his post history, or the symm.city community.
 - **CXP System (Community XP)**: Earn 50 CXP per chat message (1 min cooldown). Positive emoji reactions give +50 CXP; negative emoji reactions give -50 CXP. Higher-level members have higher reaction multipliers!
-- **Level Titles**: Script Kiddie (1-4), Hash Cracker (5-9), True Operator (10-19), Dirty Phreak (20-29), Ledger Forger (30-39), Clean Splicer (40-49), Whale Hunter (50-59), Zero-Day Broker (60+).
+- **Level Titles**: Budding Symmetry (1-4), Bilateral Balance (5-9), Rotational Harmony (10-19), Crystalline Order (20-29), Exquisitely Symmetrical (30-39), Supersymmetric (40-49), Very Symmetrical (50-59), Pure Symmetry (60+).
 - **CXP Commands**: `/level` (view stats & rank), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown).
 - **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, or `/translate` for an interactive menu.
 - **Time Zone Commands**: `/settime <location>` (save your time zone), `/time <location | @username>` (check current time anywhere or for another member; defaults to symm.city time).

@@ -18,10 +18,10 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
 - **Earn Points**: Users earn `50 CXP` for chatting (limited to 1 message per minute).
 - **Reaction Economy**: Active members earn `+50 CXP` from positive reactions on their messages, or lose `-50 CXP` from negative reactions. 
 - **Levels & Influence**: Users level up based on CXP. Higher-level users multiply the CXP effect of their reactions!
-     * *Lvl 1-4:* Script Kiddie | *Lvl 5-9:* Hash Cracker
-     * *Lvl 10-19:* True Operator | *Lvl 20-29:* Dirty Phreak
-     * *Lvl 30-39:* Ledger Forger | *Lvl 40-49:* Clean Splicer
-     * *Lvl 50-59:* Whale Hunter | *Lvl 60+:* Zero-Day Broker
+     * *Lvl 1-4:* Budding Symmetry | *Lvl 5-9:* Bilateral Balance
+     * *Lvl 10-19:* Rotational Harmony | *Lvl 20-29:* Crystalline Order
+     * *Lvl 30-39:* Exquisitely Symmetrical | *Lvl 40-49:* Supersymmetric
+     * *Lvl 50-59:* Very Symmetrical | *Lvl 60+:* Pure Symmetry
 - **Leaderboards**: View the top active members globally (`/leaderboard`) or filter by timeframe (`/leaderboard day`, `week`, `month`).
 - **Contests**: Admins can use `/setcontest` to define a specific date range for special events, trackable via `/contest`.
 - **Mini-Games**: Users can use `/steal` to attempt to steal 25-100 CXP from a random user (1-hour cooldown).
