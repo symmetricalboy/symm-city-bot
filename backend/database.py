@@ -1,0 +1,552 @@
+import asyncpg
+import os
+import logging
+import time
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+
+class Database:
+    def __init__(self):
+        self.pool = None
+        self._config_cache = None
+        self._config_cache_time = 0
+
+    async def connect(self):
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            raise ValueError("DATABASE_URL is not set in the environment.")
+
+        self.pool = await asyncpg.create_pool(database_url)
+        await self.init_db()
+        logger.info("Connected to the database successfully.")
+
+    async def disconnect(self):
+        if self.pool:
+            await self.pool.close()
+
+    async def init_db(self):
+        if not self.pool:
+            return
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    main_group_id BIGINT,
+                    channel_id BIGINT,
+                    admin_group_id BIGINT,
+                    welcome_message TEXT
+                );
+                
+                ALTER TABLE bot_config ADD COLUMN IF NOT EXISTS cxp_topic_id BIGINT;
+                ALTER TABLE bot_config ADD COLUMN IF NOT EXISTS channel_forward_topic_id BIGINT;
+                ALTER TABLE bot_config ADD COLUMN IF NOT EXISTS contest_start DATE;
+                ALTER TABLE bot_config ADD COLUMN IF NOT EXISTS contest_end DATE;
+                ALTER TABLE bot_config ADD COLUMN IF NOT EXISTS rules_message TEXT;
+                
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    cxp INTEGER DEFAULT 0,
+                    last_message_time TIMESTAMP,
+                    username VARCHAR(255),
+                    is_admin BOOLEAN DEFAULT FALSE
+                );
+                
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(255);
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name VARCHAR(255);
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_channel_admin BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blacklisted BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS last_steal_time TIMESTAMP;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    chat_id BIGINT,
+                    message_id BIGINT,
+                    user_id BIGINT,
+                    PRIMARY KEY (chat_id, message_id)
+                );
+                
+                CREATE TABLE IF NOT EXISTS translations (
+                    chat_id BIGINT,
+                    message_id BIGINT,
+                    original_text TEXT,
+                    lang_en TEXT,
+                    lang_es TEXT,
+                    lang_fr TEXT,
+                    lang_pt TEXT,
+                    lang_id TEXT,
+                    lang_fa TEXT,
+                    lang_ru TEXT,
+                    lang_uk TEXT,
+                    lang_tr TEXT,
+                    PRIMARY KEY (chat_id, message_id)
+                );
+                
+                CREATE TABLE IF NOT EXISTS translated_messages (
+                    chat_id BIGINT,
+                    message_id BIGINT,
+                    original_message_id BIGINT,
+                    author_id BIGINT,
+                    author_name TEXT,
+                    PRIMARY KEY (chat_id, message_id)
+                );
+                
+                CREATE TABLE IF NOT EXISTS user_daily_cxp (
+                    user_id BIGINT,
+                    date DATE,
+                    cxp_gained INTEGER DEFAULT 0,
+                    PRIMARY KEY (user_id, date)
+                );
+                
+                CREATE TABLE IF NOT EXISTS channel_links (
+                    channel_id BIGINT PRIMARY KEY,
+                    user_id BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                INSERT INTO bot_config (id, welcome_message, rules_message) 
+                VALUES (1, 'Welcome {mention} to symm.city! 🌆\n\n📜 Community Rules:\n- Be polite and respectful\n- No spam or unwanted advertising\n- Follow moderator instructions\n- Please use the appropriate topics for your discussions\n\n🎮 Enjoy your time in symm.city (symm.city)!', '📜 <b>symm.city Community Rules</b>:\n\n1. Be polite and respectful to all members.\n2. No spam, unsolicited DMs, or unwanted advertising.\n3. Keep conversations in the appropriate topic threads.\n4. Follow instructions from moderators.\n5. Visit symm.city for community links!') 
+                ON CONFLICT (id) DO NOTHING;
+            """
+            )
+
+    async def update_user_steal_time(self, user_id: int):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET last_steal_time = CURRENT_TIMESTAMP WHERE user_id = $1",
+                user_id,
+            )
+
+    async def get_config(self):
+        if not self.pool:
+            return None
+        if self._config_cache and time.time() - self._config_cache_time < 60:
+            return self._config_cache
+
+        async with self.pool.acquire() as conn:
+            config = await conn.fetchrow("SELECT * FROM bot_config WHERE id = 1")
+            self._config_cache = config
+            self._config_cache_time = time.time()
+            return config
+
+    async def update_config(self, **kwargs):
+        if not self.pool:
+            logger.error("update_config returning False because self.pool is None")
+            return False
+
+        valid_keys = {
+            "main_group_id",
+            "channel_id",
+            "admin_group_id",
+            "welcome_message",
+            "rules_message",
+            "cxp_topic_id",
+            "channel_forward_topic_id",
+            "contest_start",
+            "contest_end",
+        }
+        updates = []
+        values = []
+
+        for k, v in kwargs.items():
+            if k in valid_keys:
+                values.append(v)
+                updates.append(f"{k} = ${len(values)}")
+            else:
+                logger.warning(f"update_config ignoring invalid key: {k}")
+
+        if not updates:
+            logger.error(
+                f"update_config returning False because updates is empty. kwargs: {kwargs}"
+            )
+            return False
+
+        set_clause = ", ".join(updates)
+        query = f"UPDATE bot_config SET {set_clause} WHERE id = 1"
+        logger.info(f"update_config executing: {query} with values: {values}")
+
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(query, *values)
+                logger.info(f"update_config execute result: {result}")
+                if result == "UPDATE 0":
+                    raise Exception("Database configuration row id=1 is missing.")
+                self._config_cache = None
+                return True
+        except Exception as e:
+            logger.error(f"update_config encountered an unexpected error: {e}")
+            raise
+
+    async def get_user(self, user_id):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            user = await conn.fetchrow(
+                "SELECT * FROM users WHERE user_id = $1", user_id
+            )
+            if not user:
+                await conn.execute(
+                    "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                    user_id,
+                )
+                user = await conn.fetchrow(
+                    "SELECT * FROM users WHERE user_id = $1", user_id
+                )
+            return user
+
+    async def get_user_by_username(self, username: str):
+        if not self.pool:
+            return None
+        # remove @ if present
+        username = username.lstrip("@")
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(
+                "SELECT * FROM users WHERE username ILIKE $1 OR display_name ILIKE $1",
+                username,
+            )
+
+    async def get_random_user(self, exclude_user_id: int):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(
+                "SELECT * FROM users WHERE user_id != $1 ORDER BY RANDOM() LIMIT 1",
+                exclude_user_id,
+            )
+
+    async def update_user_username(self, user_id: int, username: str):
+        if not self.pool or not username:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET username = $2 WHERE user_id = $1", user_id, username
+            )
+
+    async def update_user_display_name(
+        self, user_id: int, display_name: str, username: str = None
+    ):
+        if not self.pool or not display_name:
+            return
+        async with self.pool.acquire() as conn:
+            if username:
+                await conn.execute(
+                    "UPDATE users SET display_name = $2, username = $3 WHERE user_id = $1",
+                    user_id,
+                    display_name,
+                    username,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE users SET display_name = $2 WHERE user_id = $1",
+                    user_id,
+                    display_name,
+                )
+
+    async def get_user_location(self, user_id: int):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT location FROM users WHERE user_id = $1", user_id
+            )
+
+    async def update_user_location(self, user_id: int, location: str):
+        if not self.pool or not location:
+            return
+        # Basic input validation, ensuring it's not too long
+        location = location[:255]
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET location = $2 WHERE user_id = $1", user_id, location
+            )
+
+    async def update_user_admin_status(self, user_id: int, is_admin: bool):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET is_admin = $2 WHERE user_id = $1", user_id, is_admin
+            )
+
+    async def get_admin_users(self):
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("SELECT * FROM users WHERE is_admin = TRUE")
+
+    async def update_user_channel_admin_status(self, user_id: int, is_channel_admin: bool):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET is_channel_admin = $2 WHERE user_id = $1", user_id, is_channel_admin
+            )
+
+    async def get_channel_admins(self):
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("SELECT * FROM users WHERE is_channel_admin = TRUE")
+
+    async def update_user_blacklist_status(self, user_id: int, is_blacklisted: bool):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET is_blacklisted = $2 WHERE user_id = $1", user_id, is_blacklisted
+            )
+
+    async def get_blacklisted_users(self):
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("SELECT * FROM users WHERE is_blacklisted = TRUE")
+
+    async def update_user_cxp(self, user_id, delta_cxp, update_timestamp=False):
+        if not self.pool:
+            return False
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if update_timestamp:
+                    await conn.execute(
+                        "UPDATE users SET cxp = cxp + $2, last_message_time = CURRENT_TIMESTAMP WHERE user_id = $1",
+                        user_id,
+                        delta_cxp,
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE users SET cxp = cxp + $2 WHERE user_id = $1",
+                        user_id,
+                        delta_cxp,
+                    )
+                await conn.execute(
+                    """
+                    INSERT INTO user_daily_cxp (user_id, date, cxp_gained)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (user_id, date) DO UPDATE 
+                    SET cxp_gained = user_daily_cxp.cxp_gained + $3
+                    """,
+                    user_id,
+                    utc_date,
+                    delta_cxp,
+                )
+            return True
+
+    async def get_user_rank(self, cxp):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE cxp > $1 AND (is_blacklisted = FALSE OR is_blacklisted IS NULL)",
+                cxp,
+            )
+            return count + 1
+
+    async def get_leaderboard(self, limit=3, start_date=None, end_date=None):
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            if start_date and end_date:
+                return await conn.fetch(
+                    """
+                    SELECT u.user_id, u.is_admin, u.display_name, u.username, u.cxp AS total_cxp,
+                           COALESCE(SUM(d.cxp_gained), 0) AS cxp
+                    FROM users u
+                    JOIN user_daily_cxp d ON u.user_id = d.user_id
+                    LEFT JOIN channel_links cl ON u.user_id = cl.channel_id
+                    WHERE d.date >= $1 AND d.date <= $2 AND cl.channel_id IS NULL AND (u.is_blacklisted = FALSE OR u.is_blacklisted IS NULL)
+                    GROUP BY u.user_id, u.is_admin, u.display_name, u.username, u.cxp
+                    HAVING COALESCE(SUM(d.cxp_gained), 0) > 0
+                    ORDER BY cxp DESC
+                    LIMIT $3
+                    """,
+                    start_date, end_date, limit
+                )
+            else:
+                return await conn.fetch(
+                    """
+                    SELECT u.* FROM users u 
+                    LEFT JOIN channel_links cl ON u.user_id = cl.channel_id 
+                    WHERE cl.channel_id IS NULL AND (u.is_blacklisted = FALSE OR u.is_blacklisted IS NULL)
+                    ORDER BY u.cxp DESC LIMIT $1
+                    """, limit
+                )
+
+    async def record_message(self, chat_id, message_id, user_id):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO messages (chat_id, message_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                chat_id,
+                message_id,
+                user_id,
+            )
+
+    async def get_message_author(self, chat_id, message_id):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT user_id FROM messages WHERE chat_id = $1 AND message_id = $2",
+                chat_id,
+                message_id,
+            )
+
+    async def save_original_translation_text(
+        self, chat_id: int, message_id: int, text: str
+    ):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO translations (chat_id, message_id, original_text) 
+                VALUES ($1, $2, $3) 
+                ON CONFLICT (chat_id, message_id) DO UPDATE SET original_text = EXCLUDED.original_text
+                """,
+                chat_id,
+                message_id,
+                text,
+            )
+
+    async def get_translation(self, chat_id: int, message_id: int, lang_code: str):
+        """Fetch the specific cached language text if it exists."""
+        if not self.pool:
+            return None
+
+        # Valid language codes matching our strict columns
+        valid_langs = {"en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr"}
+        if lang_code not in valid_langs:
+            return None
+
+        # Dynamically build the column name (safe because it's strictly validated above)
+        column_name = f"lang_{lang_code}"
+
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                f"SELECT {column_name} FROM translations WHERE chat_id = $1 AND message_id = $2",
+                chat_id,
+                message_id,
+            )
+
+    async def get_translation_original_text(self, chat_id: int, message_id: int):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT original_text FROM translations WHERE chat_id = $1 AND message_id = $2",
+                chat_id,
+                message_id,
+            )
+
+    async def save_translation(
+        self, chat_id: int, message_id: int, lang_code: str, translated_text: str
+    ):
+        if not self.pool:
+            return
+
+        valid_langs = {"en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr"}
+        if lang_code not in valid_langs:
+            return
+
+        column_name = f"lang_{lang_code}"
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE translations SET {column_name} = $3 WHERE chat_id = $1 AND message_id = $2",
+                chat_id,
+                message_id,
+                translated_text,
+            )
+
+    async def link_translation(
+        self,
+        chat_id: int,
+        message_id: int,
+        original_message_id: int,
+        author_id: int,
+        author_name: str,
+    ):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO translated_messages (chat_id, message_id, original_message_id, author_id, author_name)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (chat_id, message_id) DO NOTHING
+                """,
+                chat_id,
+                message_id,
+                original_message_id,
+                author_id,
+                author_name,
+            )
+
+    async def get_translation_link(self, chat_id: int, message_id: int):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(
+                "SELECT original_message_id, author_id, author_name FROM translated_messages WHERE chat_id = $1 AND message_id = $2",
+                chat_id,
+                message_id,
+            )
+
+    async def link_channel(self, channel_id: int, user_id: int):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO channel_links (channel_id, user_id) 
+                    VALUES ($1, $2) 
+                    ON CONFLICT (channel_id) DO UPDATE SET user_id = EXCLUDED.user_id
+                    """,
+                    channel_id,
+                    user_id,
+                )
+                
+                # Check if channel had existing CXP
+                channel_data = await conn.fetchrow("SELECT cxp FROM users WHERE user_id = $1", channel_id)
+                if channel_data and channel_data["cxp"] > 0:
+                    channel_cxp = channel_data["cxp"]
+                    # Add to user
+                    await conn.execute("UPDATE users SET cxp = cxp + $2 WHERE user_id = $1", user_id, channel_cxp)
+                    # Reset channel cxp
+                    await conn.execute("UPDATE users SET cxp = 0 WHERE user_id = $1", channel_id)
+
+    async def get_channel_owner(self, channel_id: int):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT user_id FROM channel_links WHERE channel_id = $1", channel_id
+            )
+
+    async def get_user_channels(self, user_id: int):
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(
+                "SELECT channel_id FROM channel_links WHERE user_id = $1", user_id
+            )
+
+    async def unlink_channel(self, channel_id: int):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM channel_links WHERE channel_id = $1", channel_id
+            )
+
+
+db = Database()

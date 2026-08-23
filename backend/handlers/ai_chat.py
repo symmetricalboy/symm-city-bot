@@ -1,0 +1,168 @@
+import logging
+import os
+from telegram import Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.ext import CallbackContext
+from google import genai
+import html
+from database import db
+from handlers.cxp import enforce_cxp_topic
+
+# Import our knowledge base and prompts
+from ai_library import ANSWER_GENERATION_PROMPT, get_relevant_context
+
+logger = logging.getLogger(__name__)
+
+# Initialize the Gemini Client
+api_key = os.getenv("GEMINI_API_KEY")
+
+try:
+    gemini_client = genai.Client() if api_key else None
+except Exception as e:
+    logger.error("Failed to initialize Gemini client in ai_chat: %s", e)
+    gemini_client = None
+
+
+async def _typing_indicator_job(context: CallbackContext):
+    """Job to continually send typing indicator."""
+    chat_id = context.job.data.get("chat_id")
+    message_thread_id = context.job.data.get("message_thread_id")
+
+    try:
+        await context.bot.send_chat_action(
+            chat_id=chat_id,
+            action=ChatAction.TYPING,
+            message_thread_id=message_thread_id,
+        )
+    except Exception as e:
+        logger.warning("Failed to send typing action: %s", e)
+
+
+async def _delete_messages_job(context: CallbackContext):
+    """Job to delete messages after a delay."""
+    chat_id = context.job.data.get("chat_id")
+    message_ids = context.job.data.get("message_ids", [])
+    for msg_id in message_ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception as e:
+            logger.warning("Failed to auto-delete message %s: %s", msg_id, e)
+
+
+async def ask_cmd(update: Update, context: CallbackContext):
+    """
+    Handle the /ask command.
+    Retrieves grounded context from symm's Bluesky post history & core knowledge,
+    then generates a response with gemini-3.7-flash.
+    """
+    if not update.effective_user or not update.message:
+        return
+
+    # Extract the user's question
+    question = " ".join(context.args) if context.args else ""
+
+    # If there's no question, but they reply to a message, try to use that text.
+    if not question and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        question = getattr(reply, "text", reply.caption) or ""
+
+    if not question:
+        await update.message.reply_text(
+            "Please provide a question after the command, e.g., `/ask What is Symmetris?`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if not gemini_client:
+        await update.message.reply_text(
+            "The AI agent is currently offline. (API key not configured).",
+        )
+        return
+
+    config = await db.get_config()
+    cxp_topic_id = config.get("cxp_topic_id") if config else None
+    main_group_id = config.get("main_group_id") if config else None
+
+    if not await enforce_cxp_topic(update, context, main_group_id, cxp_topic_id):
+        return
+
+    thread_id = update.message.message_thread_id
+    chat_id = update.effective_chat.id
+
+    # Start typing indicator
+    action_thread_id = thread_id
+    if update.effective_chat.is_forum and thread_id is None:
+        action_thread_id = 1
+
+    try:
+        await context.bot.send_chat_action(
+            chat_id=chat_id,
+            action=ChatAction.TYPING,
+            message_thread_id=action_thread_id,
+        )
+    except Exception:
+        pass
+
+    typing_job = context.job_queue.run_repeating(
+        _typing_indicator_job,
+        interval=4,
+        first=4,
+        data={
+            "chat_id": chat_id,
+            "message_thread_id": action_thread_id,
+        },
+    )
+
+    try:
+        # Step 1: Retrieve context from Bluesky history + core profile
+        context_data = get_relevant_context(question)
+
+        # Step 2: Determine user's name
+        user_obj = update.effective_user
+        ai_username = user_obj.username or user_obj.first_name
+
+        # Step 3: Answer Generation using gemini-3.7-flash
+        generation_prompt = ANSWER_GENERATION_PROMPT.format(
+            context=context_data, question=question, username=ai_username
+        )
+
+        final_response = gemini_client.models.generate_content(
+            model="gemini-3.7-flash",
+            contents=generation_prompt,
+        )
+
+        answer_text = final_response.text.strip()
+
+        # Enforce max length of 3900 characters
+        if len(answer_text) > 3900:
+            answer_text = answer_text[:3897] + "..."
+
+        sent_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=answer_text,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=update.message.message_id,
+        )
+
+        # Schedule auto-delete for original command and response after 60 seconds
+        context.job_queue.run_once(
+            _delete_messages_job,
+            60,
+            data={
+                "chat_id": chat_id,
+                "message_ids": [update.message.message_id, sent_msg.message_id],
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Error handling /ask command: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text="My connection is experiencing interference right now. Please try again in a moment.",
+            reply_to_message_id=update.message.message_id,
+        )
+    finally:
+        if typing_job:
+            typing_job.schedule_removal()

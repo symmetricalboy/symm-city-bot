@@ -1,0 +1,364 @@
+"""
+Telegram bot that alerts group admins when '@admin' is mentioned.
+"""
+
+import logging
+import os
+import warnings
+from dotenv import load_dotenv
+
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    TypeHandler,
+    filters,
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    MessageReactionHandler,
+)
+from telegram.constants import ParseMode
+
+from database import db
+from handlers.owner_menu import get_config_conversation_handler
+from handlers.channel_admin import get_channel_admin_conversation, handle_post_action, handle_forward_decision
+from handlers.verification import welcome_new_member, verify_user
+from handlers.service_cleaner import clean_service_messages
+from handlers.cxp import (
+    track_message_activity,
+    evaluate_reaction,
+    user_stats_cmd,
+    leaderboard_cmd,
+    give_cxp_cmd,
+    get_id_cmd,
+    set_admin_cmd,
+    steal_cxp_cmd,
+    setcontest_cmd,
+    contest_cmd,
+    syncperms_cmd,
+)
+from handlers.help import help_cmd, commands_cmd, rules_cmd
+from handlers.translation import (
+    translate_en_cmd,
+    translate_pt_cmd,
+    translate_id_cmd,
+    translate_ru_cmd,
+    translate_es_cmd,
+    translate_fa_cmd,
+    translate_tr_cmd,
+    translate_fr_cmd,
+    translate_uk_cmd,
+    translate_interactive_cmd,
+    translate_callback,
+)
+from handlers.moderation import mute_cmd, unmute_cmd, kick_cmd, ban_cmd
+from handlers.ai_chat import ask_cmd
+from handlers.time import time_cmd, settime_cmd
+from handlers.ping import ping_cmd
+from handlers.channel_link import set_channel_cmd
+
+# Suppress Python 3.14 SyntaxWarning from anyio dependency
+warnings.filterwarnings(
+    "ignore", category=SyntaxWarning, message=".*'return' in a 'finally' block.*"
+)
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.WARNING
+)
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_OWNER_ID = os.getenv("BOT_OWNER_ID")
+if BOT_OWNER_ID:
+    try:
+        BOT_OWNER_ID = int(BOT_OWNER_ID)
+    except ValueError:
+        logger.error("BOT_OWNER_ID must be an integer.")
+        BOT_OWNER_ID = None
+
+
+async def auth_middleware(update: Update, context) -> None:
+    """Global middleware to enforce owner-only access and initialization state."""
+    if not update.effective_chat:
+        return
+
+    chat_type = update.effective_chat.type
+
+    if chat_type == "private":
+        user_id = update.effective_user.id if update.effective_user else None
+        is_allowed = False
+        
+        if not BOT_OWNER_ID:
+            if update.message:
+                await update.message.reply_text("Owner ID is not configured in the bot's environment.")
+            raise ApplicationHandlerStop()
+            
+        if user_id == BOT_OWNER_ID:
+            is_allowed = True
+        elif user_id:
+            db_user = await db.get_user(user_id)
+            if db_user and db_user.get("is_channel_admin"):
+                is_allowed = True
+                
+        if not is_allowed:
+            # Check if attempting to run an allowed user-facing command
+            message_text = update.message.text.lower() if update.message and update.message.text else ""
+            if message_text.startswith("/start setchannel") or message_text.startswith("/setchannel"):
+                # We allow users to use the bot in DM for channel linking
+                pass
+            else:
+                if update.message:
+                    await update.message.reply_text("This bot does not provide any user facing functionality via direct message except for linking channels.")
+                raise ApplicationHandlerStop()
+
+    if chat_type in ("group", "supergroup"):
+        config = await db.get_config()
+        if config:
+            main_group_id = config.get("main_group_id")
+            if main_group_id and update.effective_chat.id != main_group_id:
+                raise ApplicationHandlerStop()
+
+
+async def admin_mention(update: Update, context) -> None:
+    """Handle @admin mentions to notify all admins, restricted to the public topic group."""
+    message_text = update.message.text.lower()
+    if "@admin" in message_text:
+        chat = update.effective_chat
+
+        # Check if the bot is configured and if the current chat matches the public topic group
+        config = await db.get_config()
+        if not config:
+            return
+
+        main_group_id = config.get("main_group_id")
+
+        # If no public main group is configured, or if the current chat doesn't match, ignore the mention
+        if not main_group_id or chat.id != main_group_id:
+            return
+
+        admins = await chat.get_administrators()
+        admin_mentions = []
+        for admin in admins:
+            if not admin.user.is_bot:
+                admin_mentions.append(
+                    f'<a href="tg://user?id={admin.user.id}">&#8205;</a>'
+                )
+                # Pre-emptively register their admin status in the DB
+                await db.update_user_admin_status(admin.user.id, True)
+
+        await update.message.reply_text(
+            "<code>All group admins have been alerted!</code>\n"
+            + "".join(admin_mentions),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=update.message.message_id,
+        )
+
+
+async def post_init(application: Application) -> None:
+    """Initialize resources after the bot starts."""
+    # DB initialization moved to explicit call in orchestrator loop
+    pass
+
+
+async def post_shutdown(application: Application) -> None:
+    """Clean up resources when the bot stops."""
+    # DB disconnect moved to explicit call in orchestrator loop
+    pass
+
+
+def main() -> None:
+    """Start the bot."""
+    # Create the Application
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
+    # Add handlers
+    application.add_handler(TypeHandler(Update, auth_middleware), group=-1)
+
+    application.add_handler(get_config_conversation_handler())
+    application.add_handler(get_channel_admin_conversation())
+    application.add_handler(CallbackQueryHandler(handle_post_action, pattern="^draft_"))
+    application.add_handler(CallbackQueryHandler(handle_forward_decision, pattern="^(forward_post_|skip_forward_)"))
+    application.add_handler(MessageHandler(filters.Regex(r"@admin"), admin_mention))
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member)
+    )
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.ALL, clean_service_messages)
+    )
+    application.add_handler(CallbackQueryHandler(verify_user, pattern=r"^verify_"))
+    application.add_handler(CallbackQueryHandler(translate_callback, pattern=r"^tr_"))
+
+    # CXP Handlers
+    application.add_handler(
+        MessageHandler(
+            filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
+            track_message_activity,
+        ),
+        group=1,
+    )
+    application.add_handler(MessageReactionHandler(evaluate_reaction))
+    application.add_handler(CommandHandler("level", user_stats_cmd))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_cmd))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("commands", commands_cmd))
+    application.add_handler(CommandHandler("rules", rules_cmd))
+    application.add_handler(CommandHandler("give", give_cxp_cmd))
+    application.add_handler(CommandHandler("checkid", get_id_cmd))
+    application.add_handler(CommandHandler("setadmin", set_admin_cmd))
+    application.add_handler(CommandHandler("steal", steal_cxp_cmd))
+    application.add_handler(CommandHandler("setcontest", setcontest_cmd))
+    application.add_handler(CommandHandler("contest", contest_cmd))
+    application.add_handler(CommandHandler("syncperms", syncperms_cmd))
+
+    # Translation Handlers
+    application.add_handler(CommandHandler("en", translate_en_cmd))
+    application.add_handler(CommandHandler("pt", translate_pt_cmd))
+    application.add_handler(CommandHandler("id", translate_id_cmd))
+    application.add_handler(CommandHandler("ru", translate_ru_cmd))
+    application.add_handler(CommandHandler("es", translate_es_cmd))
+    application.add_handler(CommandHandler("fa", translate_fa_cmd))
+    application.add_handler(CommandHandler("tr", translate_tr_cmd))
+    application.add_handler(CommandHandler("fr", translate_fr_cmd))
+    application.add_handler(CommandHandler("uk", translate_uk_cmd))
+    application.add_handler(CommandHandler("translate", translate_interactive_cmd))
+
+    # Moderation Handlers
+    application.add_handler(CommandHandler("mute", mute_cmd))
+    application.add_handler(CommandHandler("unmute", unmute_cmd))
+    application.add_handler(CommandHandler("kick", kick_cmd))
+    application.add_handler(CommandHandler("ban", ban_cmd))
+
+    # AI Chat
+    application.add_handler(CommandHandler("ask", ask_cmd))
+
+    # Time Features
+    application.add_handler(CommandHandler("time", time_cmd))
+    application.add_handler(CommandHandler("settime", settime_cmd))
+
+    # Ping Feature
+    application.add_handler(CommandHandler("ping", ping_cmd))
+
+    # Channel Claiming
+    application.add_handler(CommandHandler("setchannel", set_channel_cmd))
+
+    # Start the Bot
+    PORT = int(os.environ.get("PORT", "443"))
+    RAILWAY_PUBLIC_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    raw_public_domain = (
+        RAILWAY_PUBLIC_DOMAIN
+        if RAILWAY_PUBLIC_DOMAIN
+        else os.environ.get("PUBLIC_DOMAIN")
+    )
+
+    PUBLIC_DOMAIN = None
+    if raw_public_domain:
+        # Strip scheme if user provided one manually
+        PUBLIC_DOMAIN = (
+            raw_public_domain.replace("https://", "").replace("http://", "").strip("/")
+        )
+
+    # We need a FastAPI application to serve the bot webhooks
+    from fastapi import FastAPI, Request, Response
+    import urllib.request
+    import json
+    import uvicorn
+    from telegram.ext import ExtBot
+
+    fastapi_app = FastAPI(title="symm.city bot API")
+
+    @fastapi_app.get("/health")
+    async def health_check():
+        return {"status": "ok", "bot": "symm.city bot"}
+
+    # ---------------------------------------------------------
+    # Webhook and FastAPI Startup
+    # ---------------------------------------------------------
+    webhook_info_url = (
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+    )
+    expected_webhook_url = (
+        f"https://{PUBLIC_DOMAIN}/telegram" if PUBLIC_DOMAIN else None
+    )
+
+    # We only set up the webhook route if a public domain is configured
+    if PUBLIC_DOMAIN:
+
+        @fastapi_app.post("/telegram")
+        async def telegram_webhook(request: Request):
+            # Process the update synchronously in the background task using process_update
+            # or update_queue.put. We'll use update_queue.put as recommended.
+            await application.update_queue.put(
+                Update.de_json(data=await request.json(), bot=application.bot)
+            )
+            return Response()
+
+    async def run_fastapi_and_bot():
+        # Setup explicit database connection before initializing
+        try:
+            logger.info("Initializing explicit database connection...")
+            await db.connect()
+            logger.info(f"Database Pool Initialized: {db.pool}")
+        except Exception as e:
+            logger.error(f"FATAL: Database rejected connection during startup: {e}")
+            raise
+
+        # Initialize telegram-related dependencies
+        await application.initialize()
+        await application.start()
+
+        # Try:
+        #     from handlers.cxp import backfill_member_tags
+
+        #     context_task = asyncio.create_task(backfill_member_tags(application.bot))
+        # except Exception as e:
+        #     logger.error("Failed to start backfill member tags task: %s", e)
+
+        if PUBLIC_DOMAIN:
+            logger.info(
+                f"Starting webhook via FastAPI on port {PORT} for domain {PUBLIC_DOMAIN}"
+            )
+            # Ensure any existing webhook is either correct or overridden
+            await application.bot.set_webhook(
+                url=expected_webhook_url,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
+        else:
+            logger.info(
+                "No public domain provided. Starting FastAPI and proceeding with long polling (getUpdates)."
+            )
+            # Clear webhook to ensure polling works
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+
+        # Run the FastAPI server concurrently
+        config = uvicorn.Config(
+            app=fastapi_app, host="0.0.0.0", port=PORT, log_level="info"
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+        # Shutdown sequence
+        logger.info("Shutting down application...")
+        if not PUBLIC_DOMAIN:
+            await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        await db.disconnect()
+
+    import asyncio
+
+    asyncio.run(run_fastapi_and_bot())
+
+
+if __name__ == "__main__":
+    main()

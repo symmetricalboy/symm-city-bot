@@ -1,0 +1,16 @@
+__pycache__
+logs
+.env
+.venv
+.env.local
+
+# Web dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Vite / IDE
+.DS_Store
+.vscode/
+training-data/
