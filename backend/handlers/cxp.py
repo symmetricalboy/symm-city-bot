@@ -213,19 +213,19 @@ def calculate_level(cxp: int) -> int:
     return math.floor((1 + math.sqrt(1 + 4 * safe_cxp / 250)) / 2)
 
 
-async def apply_level_permissions(bot, chat_id: int, user_id: int, level: int):
-    """Apply specific Telegram chat permissions to a user based on their CXP level."""
+async def apply_level_permissions(bot, chat_id: int, user_id: int, level: int = 1):
+    """Apply unrestricted Telegram chat permissions to a user."""
     permissions = ChatPermissions(
         can_send_messages=True,
-        can_send_audios=level >= 5,
-        can_send_documents=level >= 5,
-        can_send_photos=level >= 2,
-        can_send_videos=level >= 5,
-        can_send_video_notes=False, # Group default is off
-        can_send_voice_notes=False, # Group default is off
-        can_send_polls=False,       # Group default is off
-        can_send_other_messages=level >= 2,
-        can_add_web_page_previews=level >= 5,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
         can_change_info=False,
         can_invite_users=True,
         can_pin_messages=False,
@@ -236,7 +236,7 @@ async def apply_level_permissions(bot, chat_id: int, user_id: int, level: int):
     except error.RetryAfter:
         raise
     except Exception as e:
-        logger.error("Failed to apply permissions for level %s to user %s: %s", level, user_id, e)
+        logger.error("Failed to apply permissions to user %s: %s", user_id, e)
 
 
 def _get_member_tag_string(level: int) -> str:
@@ -313,10 +313,6 @@ async def _process_db_message_and_cxp(
         new_level = calculate_level(current_cxp + MESSAGE_CXP)
         if new_level > old_level:
             await _announce_level_up(context, user, new_level)
-        if new_level != old_level:
-            context.application.create_task(
-                apply_level_permissions(context.bot, chat_id, user.id, new_level)
-            )
 
 
 async def track_message_activity(update: Update, context: CallbackContext):
@@ -372,7 +368,7 @@ async def track_message_activity(update: Update, context: CallbackContext):
                         ])
                         msg = await update.message.reply_text(
                             f"⚠️ *Unlinked Channel Warning*\n\n"
-                            f"You are posting as a channel that is not linked to your user account. This means you will not earn CXP and your user-level permissions will not apply.\n\n"
+                            f"You are posting as a channel that is not linked to your user account. This means you will not earn CXP.\n\n"
                             f"Please click the button below to link it.",
                             reply_markup=keyboard,
                             parse_mode="Markdown"
@@ -407,45 +403,6 @@ async def track_message_activity(update: Update, context: CallbackContext):
     # Only track activity in the main group
     if chat_id != main_group_id:
         return
-
-    # We need user data early for link moderation
-    user_data = await db.get_user(user_id)
-    current_cxp = user_data.get("cxp", 0) if user_data else 0
-    level = calculate_level(current_cxp)
-
-    # Link moderation for users below level 5
-    if level < 5:
-        has_link = False
-        if update.message.entities:
-            has_link = any(ent.type in ("url", "text_link") for ent in update.message.entities)
-        elif update.message.caption_entities:
-            has_link = any(ent.type in ("url", "text_link") for ent in update.message.caption_entities)
-
-        if has_link:
-            try:
-                await update.message.delete()
-                import html
-                first_name_esc = html.escape(getattr(user_obj, "first_name", f"User {user_id}"))
-                mention = f'<a href="tg://user?id={user_id}">{first_name_esc}</a>'
-                
-                thread_id = update.message.message_thread_id
-                if update.effective_chat and update.effective_chat.is_forum and thread_id is None:
-                    thread_id = 1
-                    
-                msg = await context.bot.send_message(
-                    chat_id=chat_id,
-                    message_thread_id=thread_id,
-                    text=f"🚫 {mention}, you cannot send links until you reach level 5.",
-                    parse_mode="HTML"
-                )
-                context.job_queue.run_once(
-                    _delete_message_job,
-                    60,
-                    data={"chat_id": chat_id, "message_id": msg.message_id}
-                )
-            except Exception as e:
-                logger.error("Failed to delete link message or send warning: %s", e)
-            return
 
     # Fast in-memory cache update for reactions
     MESSAGE_AUTHOR_CACHE.put((chat_id, update.message.message_id), user_id)
@@ -589,11 +546,6 @@ async def evaluate_reaction(update: Update, context: CallbackContext):
         new_data = await db.get_user(author_id)
         new_cxp = new_data.get("cxp", 0)
         new_level = calculate_level(new_cxp)
-
-        if new_level != old_level:
-            context.application.create_task(
-                apply_level_permissions(context.bot, reaction_update.chat.id, author_id, new_level)
-            )
 
         if new_level > old_level:
             try:
@@ -1058,11 +1010,6 @@ async def give_cxp_cmd(update: Update, context: CallbackContext):
     new_cxp = new_data.get("cxp", 0)
     new_level = calculate_level(new_cxp)
 
-    if new_level != old_level:
-        context.application.create_task(
-            apply_level_permissions(context.bot, main_group_id, target_id, new_level)
-        )
-
     action = "granted" if delta_cxp > 0 else "removed"
     msg = f"✅ Successfully {action} {abs(delta_cxp):,} CXP to {target_name}. Their new total is {new_cxp:,} CXP (Level {new_level})."
     await update.message.reply_text(msg)
@@ -1254,21 +1201,9 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
 
     # Deduct from target
     await db.update_user_cxp(target_id, -STEAL_AMOUNT)
-    target_new_data = await db.get_user(target_id)
-    target_new_level = calculate_level(target_new_data.get("cxp", 0))
-    if target_new_level != target_old_level:
-        context.application.create_task(
-            apply_level_permissions(context.bot, main_group_id, target_id, target_new_level)
-        )
 
     # Add to sender
     await db.update_user_cxp(user_id, STEAL_AMOUNT)
-    user_new_data = await db.get_user(user_id)
-    user_new_level = calculate_level(user_new_data.get("cxp", 0))
-    if user_new_level != user_old_level:
-        context.application.create_task(
-            apply_level_permissions(context.bot, main_group_id, user_id, user_new_level)
-        )
 
     # Update cooldown
     await db.update_user_steal_time(user_id)
@@ -1373,35 +1308,43 @@ async def setcontest_cmd(update: Update, context: CallbackContext):
 
 
 async def syncperms_cmd(update: Update, context: CallbackContext):
-    """Admin command to backfill permissions for all users in the DB based on CXP."""
+    """Admin command to backfill permissions for all users in the DB to ensure full chat access."""
     if not update.effective_user or not update.message:
         return
-        
-    if user_id != bot_owner_id:
+
+    user_id = update.effective_user.id
+    from bot import BOT_OWNER_ID
+
+    if user_id != BOT_OWNER_ID:
         user_data = await db.get_user(user_id)
         if not user_data or not user_data.get("is_admin"):
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 message_thread_id=update.message.message_thread_id,
-                text="❌ You do not have permission to use this command."
+                text="❌ You do not have permission to use this command.",
             )
             return
 
+    config = await db.get_config()
+    main_group_id = config.get("main_group_id") if config else None
     if not main_group_id:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             message_thread_id=update.message.message_thread_id,
-            text="❌ Main group ID not configured. Cannot sync permissions."
+            text="❌ Main group ID not configured. Cannot sync permissions.",
         )
         return
 
     await update.message.reply_text(
-        "🔄 Starting permission backfill... This may take a while depending on user count. Check the console logs for progress.",
-        reply_to_message_id=update.message.message_id
+        "🔄 Starting permission backfill to grant full chat access to all members... Check console logs for progress.",
+        reply_to_message_id=update.message.message_id,
     )
-    
+
     # Run the backfill in the background to avoid blocking the bot handler
-    context.application.create_task(_run_syncperms_background(context.bot, main_group_id))
+    context.application.create_task(
+        _run_syncperms_background(context.bot, main_group_id)
+    )
+
 
 async def _run_syncperms_background(bot, main_group_id):
     logger.info("Starting background permission sync...")
@@ -1412,31 +1355,37 @@ async def _run_syncperms_background(bot, main_group_id):
     # Fetch all users
     try:
         async with db.pool.acquire() as conn:
-            users = await conn.fetch("SELECT user_id, cxp FROM users")
+            users = await conn.fetch("SELECT user_id FROM users")
     except Exception as e:
         logger.error("Database error while fetching users for sync: %s", e)
         return
 
     success_count = 0
     fail_count = 0
-    
+
     for row in users:
         user_id = row["user_id"]
-        cxp = row.get("cxp", 0)
-        level = calculate_level(cxp)
-        
+
         try:
-            await apply_level_permissions(bot, main_group_id, user_id, level)
+            await apply_level_permissions(bot, main_group_id, user_id)
             success_count += 1
         except error.RetryAfter as e:
-            logger.warning("Rate limit hit during permission sync for user %s. Sleeping for %s seconds", user_id, e.retry_after)
+            logger.warning(
+                "Rate limit hit during permission sync for user %s. Sleeping for %s seconds",
+                user_id,
+                e.retry_after,
+            )
             await asyncio.sleep(e.retry_after + 1.0)
             # Try once more
             try:
-                await apply_level_permissions(bot, main_group_id, user_id, level)
+                await apply_level_permissions(bot, main_group_id, user_id)
                 success_count += 1
             except Exception as e2:
-                logger.error("Failed to sync permissions for user %s after retry: %s", user_id, e2)
+                logger.error(
+                    "Failed to sync permissions for user %s after retry: %s",
+                    user_id,
+                    e2,
+                )
                 fail_count += 1
         except error.BadRequest as e:
             # Common errors: User is admin, user not found, user left the chat
@@ -1445,8 +1394,12 @@ async def _run_syncperms_background(bot, main_group_id):
         except Exception as e:
             logger.error("Error setting permissions for user %s: %s", user_id, e)
             fail_count += 1
-            
+
         # Standard safety delay
         await asyncio.sleep(0.1)
-        
-    logger.info("Finished background permission sync. Success: %s, Failed/Skipped: %s", success_count, fail_count)
+
+    logger.info(
+        "Finished background permission sync. Success: %s, Failed/Skipped: %s",
+        success_count,
+        fail_count,
+    )

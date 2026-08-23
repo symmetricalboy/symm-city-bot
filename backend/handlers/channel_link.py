@@ -89,7 +89,7 @@ async def set_channel_cmd(update: Update, context: CallbackContext):
             chat_id=update.effective_chat.id,
             message_thread_id=thread_id,
             text=f"✅ *Success!*\n\nThe channel *{channel_title}* has been successfully linked to your user account.\n"
-            f"All CXP earned by this channel will now be credited to you, and your permissions will apply.",
+            f"All CXP earned by this channel will now be credited to you.",
             parse_mode="Markdown"
         )
         
