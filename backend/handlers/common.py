@@ -10,14 +10,11 @@ async def resolve_username(
     input_str: str, update: Update, context: CallbackContext
 ) -> tuple[int | None, str | None]:
     """
-    Centralized function to resolve a username or text_mention to a User ID and Name.
-    Strictly relies on Telegram's API and message entities.
+    Centralized function to resolve a username, user ID, or text_mention to a User ID and Name.
+    Relies on Telegram message entities, Telegram API, and DB Tracker fallback.
     Returns (user_id, user_name).
     """
-    if not input_str and not update.message:
-        return None, None
-
-    # 1. Check for explicit text_mentions (links without @ usernames)
+    # 1. Check for explicit text_mentions (links without @ usernames) in the message
     if update.message:
         entities = update.message.parse_entities(None)
         for ent, text in entities.items():
@@ -30,22 +27,51 @@ async def resolve_username(
     if not input_str:
         return None, None
 
-    # 2. Extract potential pure username
-    username_str = input_str
+    cleaned_input = input_str.strip()
+    if not cleaned_input:
+        return None, None
+
+    # 2. Check if input is a numeric Telegram User ID or Channel ID
+    try:
+        potential_id = int(cleaned_input)
+        if db.pool:
+            async with db.pool.acquire() as conn:
+                existing = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", potential_id)
+            if existing and (existing.get("display_name") or existing.get("username")):
+                name = existing.get("display_name") or (f"@{existing.get('username')}" if existing.get("username") else f"User {potential_id}")
+                return potential_id, name
+        # Verify via Telegram API
+        try:
+            chat = await context.bot.get_chat(potential_id)
+            name = (
+                chat.title
+                or (
+                    chat.first_name + (f" {chat.last_name}" if chat.last_name else "")
+                    if chat.first_name
+                    else None
+                )
+                or f"User {potential_id}"
+            )
+            return potential_id, name
+        except Exception:
+            pass
+    except ValueError:
+        pass
+
+    # 3. Extract pure mention entity if message contains one
+    username_str = cleaned_input
     if update.message and update.message.text:
-        # If it's a mention entity, extract just the mention text
         entities = update.message.parse_entities(["mention"])
         for ent, text in entities.items():
             username_str = text
             break
 
-    # Format to ensure @
-    if not username_str.startswith("@"):
-        username_str = f"@{username_str}"
+    # Format to ensure @ for Telegram API
+    handle = username_str if username_str.startswith("@") else f"@{username_str}"
 
-    # 3. Hit the Telegram API directly
+    # 4. Hit the Telegram API directly
     try:
-        chat = await context.bot.get_chat(username_str)
+        chat = await context.bot.get_chat(handle)
         name = (
             chat.title
             or (
@@ -53,21 +79,25 @@ async def resolve_username(
                 if chat.first_name
                 else None
             )
-            or username_str
+            or handle
         )
         return chat.id, name
     except Exception as e:
-        # 4. Fallback to DB Tracker
-        # Database looks up by raw string without the @
-        clean_name = username_str.lstrip("@")
-        user_row = await db.get_user_by_username(clean_name)
-        if user_row:
-            return user_row.get("user_id"), username_str
+        logger.debug("Telegram get_chat failed for %s: %s", handle, e)
 
-        logger.warning(
-            "Failed to resolve username %s via API and DB: %s", username_str, e
+    # 5. Fallback to DB Tracker
+    clean_name = username_str.lstrip("@").strip()
+    user_row = await db.get_user_by_username(clean_name)
+    if user_row:
+        display_name = user_row.get("display_name") or (
+            f"@{user_row.get('username')}" if user_row.get("username") else handle
         )
-        return None, None
+        return user_row.get("user_id"), display_name
+
+    logger.warning(
+        "Failed to resolve username %s via API and DB", username_str
+    )
+    return None, None
 
 
 async def is_user_admin(user_id: int, chat_id: int, context: CallbackContext) -> bool:

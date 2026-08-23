@@ -3,7 +3,7 @@ name = "symm-city-bot"
 version = "0.1.0"
 description = "Feature-rich community Telegram bot for symm.city."
 authors = ["symmetricalboy <email@symmetricalboy.com>"]
-readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.14"

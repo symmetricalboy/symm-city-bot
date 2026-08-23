@@ -132,7 +132,12 @@ class Database:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET last_steal_time = CURRENT_TIMESTAMP WHERE user_id = $1",
+                """
+                INSERT INTO users (user_id, last_steal_time)
+                VALUES ($1, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id) DO UPDATE
+                SET last_steal_time = CURRENT_TIMESTAMP
+                """,
                 user_id,
             )
 
@@ -216,12 +221,22 @@ class Database:
     async def get_user_by_username(self, username: str):
         if not self.pool:
             return None
-        # remove @ if present
-        username = username.lstrip("@")
+        # remove @ if present and strip whitespace
+        clean = username.lstrip("@").strip()
+        if not clean:
+            return None
         async with self.pool.acquire() as conn:
             return await conn.fetchrow(
-                "SELECT * FROM users WHERE username ILIKE $1 OR display_name ILIKE $1",
-                username,
+                """
+                SELECT * FROM users 
+                WHERE username ILIKE $1 
+                   OR username ILIKE ('@' || $1)
+                   OR display_name ILIKE $1
+                   OR display_name ILIKE ('%' || $1 || '%')
+                ORDER BY (username ILIKE $1) DESC, (username ILIKE ('@' || $1)) DESC, (display_name ILIKE $1) DESC
+                LIMIT 1
+                """,
+                clean,
             )
 
     async def get_random_user(self, exclude_user_id: int):
@@ -238,7 +253,14 @@ class Database:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET username = $2 WHERE user_id = $1", user_id, username
+                """
+                INSERT INTO users (user_id, username)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE
+                SET username = $2
+                """,
+                user_id,
+                username,
             )
 
     async def update_user_display_name(
@@ -249,14 +271,24 @@ class Database:
         async with self.pool.acquire() as conn:
             if username:
                 await conn.execute(
-                    "UPDATE users SET display_name = $2, username = $3 WHERE user_id = $1",
+                    """
+                    INSERT INTO users (user_id, display_name, username)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET display_name = $2, username = $3
+                    """,
                     user_id,
                     display_name,
                     username,
                 )
             else:
                 await conn.execute(
-                    "UPDATE users SET display_name = $2 WHERE user_id = $1",
+                    """
+                    INSERT INTO users (user_id, display_name)
+                    VALUES ($1, $2)
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET display_name = $2
+                    """,
                     user_id,
                     display_name,
                 )
@@ -276,7 +308,14 @@ class Database:
         location = location[:255]
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET location = $2 WHERE user_id = $1", user_id, location
+                """
+                INSERT INTO users (user_id, location)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE
+                SET location = $2
+                """,
+                user_id,
+                location,
             )
 
     async def update_user_admin_status(self, user_id: int, is_admin: bool):
@@ -284,7 +323,14 @@ class Database:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET is_admin = $2 WHERE user_id = $1", user_id, is_admin
+                """
+                INSERT INTO users (user_id, is_admin)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE
+                SET is_admin = $2
+                """,
+                user_id,
+                is_admin,
             )
 
     async def get_admin_users(self):
@@ -298,7 +344,14 @@ class Database:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET is_channel_admin = $2 WHERE user_id = $1", user_id, is_channel_admin
+                """
+                INSERT INTO users (user_id, is_channel_admin)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE
+                SET is_channel_admin = $2
+                """,
+                user_id,
+                is_channel_admin,
             )
 
     async def get_channel_admins(self):
@@ -312,7 +365,14 @@ class Database:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET is_blacklisted = $2 WHERE user_id = $1", user_id, is_blacklisted
+                """
+                INSERT INTO users (user_id, is_blacklisted)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE
+                SET is_blacklisted = $2
+                """,
+                user_id,
+                is_blacklisted,
             )
 
     async def get_blacklisted_users(self):
@@ -329,13 +389,23 @@ class Database:
             async with conn.transaction():
                 if update_timestamp:
                     await conn.execute(
-                        "UPDATE users SET cxp = cxp + $2, last_message_time = CURRENT_TIMESTAMP WHERE user_id = $1",
+                        """
+                        INSERT INTO users (user_id, cxp, last_message_time)
+                        VALUES ($1, $2, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) DO UPDATE
+                        SET cxp = users.cxp + $2, last_message_time = CURRENT_TIMESTAMP
+                        """,
                         user_id,
                         delta_cxp,
                     )
                 else:
                     await conn.execute(
-                        "UPDATE users SET cxp = cxp + $2 WHERE user_id = $1",
+                        """
+                        INSERT INTO users (user_id, cxp)
+                        VALUES ($1, $2)
+                        ON CONFLICT (user_id) DO UPDATE
+                        SET cxp = users.cxp + $2
+                        """,
                         user_id,
                         delta_cxp,
                     )

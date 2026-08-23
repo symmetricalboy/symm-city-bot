@@ -291,7 +291,7 @@ async def _announce_level_up(context: CallbackContext, user, new_level: int):
 
 
 async def _process_db_message_and_cxp(
-    context: CallbackContext, chat_id: int, msg_id: int, user, current_cxp: int
+    context: CallbackContext, chat_id: int, msg_id: int, user
 ):
     """Background task to save the message and award CXP without blocking the chat."""
     await db.record_message(chat_id, msg_id, user.id)
@@ -307,6 +307,8 @@ async def _process_db_message_and_cxp(
         user.id, display_name, getattr(user, "username", None)
     )
 
+    user_data = await db.get_user(user.id)
+    current_cxp = user_data.get("cxp", 0) if user_data else 0
     old_level = calculate_level(current_cxp)
     success = await db.update_user_cxp(user.id, MESSAGE_CXP, update_timestamp=True)
     if success:
@@ -421,13 +423,6 @@ async def track_message_activity(update: Update, context: CallbackContext):
     # User is eligible for CXP! Update memory cache immediately.
     RATE_LIMIT_CACHE.put(user_id, now)
 
-    if not user_data:
-        # Fallback to backgrounding the insert if user vanished
-        context.application.create_task(
-            db.record_message(chat_id, update.message.message_id, user_id)
-        )
-        return
-
     # Dispatch to background task to keep the handler lightning fast
     context.application.create_task(
         _process_db_message_and_cxp(
@@ -435,7 +430,6 @@ async def track_message_activity(update: Update, context: CallbackContext):
             chat_id,
             update.message.message_id,
             user_obj,
-            current_cxp,
         )
     )
 
@@ -1003,6 +997,10 @@ async def give_cxp_cmd(update: Update, context: CallbackContext):
     if not target_data:
         await update.message.reply_text("Could not fetch target user data.")
         return
+
+    if target_name and (not target_data.get("display_name") or not target_data.get("username")):
+        clean_user = target_name.lstrip("@") if target_name.startswith("@") else None
+        await db.update_user_display_name(target_id, target_name, clean_user)
 
     old_level = calculate_level(target_data.get("cxp", 0))
     await db.update_user_cxp(target_id, delta_cxp)
