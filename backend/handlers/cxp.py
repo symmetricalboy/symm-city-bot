@@ -260,96 +260,12 @@ def _get_member_tag_string(level: int) -> str:
 
 
 async def _update_member_tag(bot, user_id: int, new_level: int):
-    """Automatically assign a group member tag based on new CXP level."""
-    config = await db.get_config()
-    if not config:
-        return
-
-    main_group_id = config.get("main_group_id")
-    if not main_group_id:
-        return
-
-    tag = _get_member_tag_string(new_level)
-
-    if not tag:
-        return
-
-    url = f"{bot.base_url}/setChatMemberTag"
-
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    url, data={"chat_id": main_group_id, "user_id": user_id, "tag": tag}
-                )
-                data = resp.json()
-
-                if data.get("ok"):
-                    logger.info("Successfully set member tag '%s' for %s", tag, user_id)
-                    break
-
-                # Handle Telegram Errors
-                error_code = data.get("error_code")
-                desc = data.get("description", "").lower()
-
-                if error_code == 429:
-                    retry_after = data.get("parameters", {}).get("retry_after", 5)
-                    logger.warning(
-                        "Rate limited parsing tag for %s. Sleeping %s seconds...",
-                        user_id,
-                        retry_after,
-                    )
-                    await asyncio.sleep(retry_after)
-                    continue
-
-                # Benign skips (people who left, deleted their account, invalid IDs, or group creators)
-                skip_descs = [
-                    "user_not_participant",
-                    "user is deactivated",
-                    "chat_creator_required",
-                    "invalid user_id",
-                ]
-                if error_code in [400, 403] and any(s in desc for s in skip_descs):
-                    logger.debug("Skipping tag for %s: %s", user_id, desc)
-                    break
-
-                logger.warning("Failed to set member tag for %s: %s", user_id, data)
-                break
-
-        except Exception as e:
-            logger.error("Error setting member tag for %s: %s", user_id, e)
-            break
-
-
-# async def backfill_member_tags(bot):
-#     """Temporary function to backfill member tags for all existing users on startup."""
-#     logger.info("Starting CXP member tag backfill...")
-#     if not db.pool:
-#         logger.warning("DB pool not initialized, skipping backfill.")
-#         return
-
-#     async with db.pool.acquire() as conn:
-#         users = await conn.fetch("SELECT user_id, cxp FROM users")
-
-#     count = 0
-#     for row in users:
-#         user_id = row["user_id"]
-#         cxp = row.get("cxp", 0)
-#         level = calculate_level(cxp)
-#         if level >= 1:
-#             await _update_member_tag(bot, user_id, level)
-#             count += 1
-#             await asyncio.sleep(0.1)  # Add slight delay to prevent massive 429 waves
-
-#     logger.info("Finished CXP member tag backfill for %s users.", count)
+    """Disabled: Member tags are managed customly in the community."""
+    return
 
 
 async def _announce_level_up(context: CallbackContext, user, new_level: int):
-    """Announce level up in the dedicated CXP topic if configured."""
-    # Update the member tag asynchronously to prevent blocking the announcement
-    context.application.create_task(_update_member_tag(context.bot, user.id, new_level))
-
+    """Announce level up in the group."""
     config = await db.get_config()
     if not config:
         return
@@ -1144,9 +1060,6 @@ async def give_cxp_cmd(update: Update, context: CallbackContext):
 
     if new_level != old_level:
         context.application.create_task(
-            _update_member_tag(context.bot, target_id, new_level)
-        )
-        context.application.create_task(
             apply_level_permissions(context.bot, main_group_id, target_id, new_level)
         )
 
@@ -1345,9 +1258,6 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     target_new_level = calculate_level(target_new_data.get("cxp", 0))
     if target_new_level != target_old_level:
         context.application.create_task(
-            _update_member_tag(context.bot, target_id, target_new_level)
-        )
-        context.application.create_task(
             apply_level_permissions(context.bot, main_group_id, target_id, target_new_level)
         )
 
@@ -1356,9 +1266,6 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     user_new_data = await db.get_user(user_id)
     user_new_level = calculate_level(user_new_data.get("cxp", 0))
     if user_new_level != user_old_level:
-        context.application.create_task(
-            _update_member_tag(context.bot, user_id, user_new_level)
-        )
         context.application.create_task(
             apply_level_permissions(context.bot, main_group_id, user_id, user_new_level)
         )
