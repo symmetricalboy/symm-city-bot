@@ -32,12 +32,19 @@ SYMM_CITY_KNOWLEDGE = """
   - Creates tools for Bluesky (Lexicons, alt-text bots, AT Protocol tools), Telegram bots, and web applications.
   - Enjoys creative coding, robotics/automation, Android ecosystem, and UI/UX design.
 
+**symm.city Community Rules:**
+1. Be kind.
+2. Assume good intent.
+3. Be symmetrical.
+4. Be patient.
+5. Be *very* symmetrical.
+
 **symm.city Bot Features:**
 - **AI Assistant (/ask <question>)**: Ask questions about symm, his projects, game development, music, thoughts from his post history, or the symm.city community.
 - **CXP System (Community XP)**: Earn 50 CXP per chat message (1 min cooldown). Positive emoji reactions give +50 CXP; negative emoji reactions give -50 CXP. Higher-level members have higher reaction multipliers!
 - **Level Titles**: Script Kiddie (1-4), Hash Cracker (5-9), True Operator (10-19), Dirty Phreak (20-29), Ledger Forger (30-39), Clean Splicer (40-49), Whale Hunter (50-59), Zero-Day Broker (60+).
 - **CXP Commands**: `/level` (view stats & rank), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown).
-- **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/pt`, `/id`, `/ru`, `/tr`, `/fa`, `/uk`, or `/translate` for an interactive menu.
+- **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, or `/translate` for an interactive menu.
 - **Time Zone Commands**: `/settime <location>` (save your time zone), `/time <location | @username>` (check current time anywhere or for another member; defaults to symm.city time).
 - **Moderation & Alerts**: Mention `@admin` in the group to ping all administrators. Moderation tools include `/mute`, `/unmute`, `/kick`, `/ban`.
 - **Channel Post Drafting**: Authorized channel admins can use `/draft` in DM to format and preview posts with custom URL buttons.

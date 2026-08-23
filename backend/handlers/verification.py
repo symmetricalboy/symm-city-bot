@@ -73,7 +73,14 @@ async def welcome_new_member(
             # fallback generic if blank
             if not welcome_text:
                 welcome_text = (
-                    "Welcome {mention} to symm.city! Please read the rules and click verification below."
+                    "Welcome {mention} to symm.city! 🌆\n\n"
+                    "📜 <b>symm.city Community Rules</b>:\n\n"
+                    "1. Be kind.\n"
+                    "2. Assume good intent.\n"
+                    "3. Be symmetrical.\n"
+                    "4. Be patient.\n"
+                    "5. Be <i>very</i> symmetrical.\n\n"
+                    "We're glad to have you here! 💚"
                 )
 
             try:

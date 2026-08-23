@@ -32,7 +32,7 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
 - **Clean Chat**: Automatically cleans up the command and response after 60 seconds to avoid cluttering discussion topics.
 
 ### 🌐 Translation & Internationalization
-- **Quick Translation**: Start or reply to a message with a language code command to instantly translate it (e.g. `/en`, `/es`, `/fr`, `/pt`, `/id`, `/ru`, `/tr`, `/fa`, `/uk`).
+- **Quick Translation**: Start or reply to a message with a language code command to instantly translate it (e.g. `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`).
 - **Interactive Menu**: Reply to any message with `/translate` to open an inline button menu with language options.
 - **Smart Formatting**: Powered by `gemini-3.7-flash`, preserving Telegram HTML tags and original author attribution.
 

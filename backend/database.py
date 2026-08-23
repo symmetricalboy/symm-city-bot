@@ -83,8 +83,21 @@ class Database:
                     lang_ru TEXT,
                     lang_uk TEXT,
                     lang_tr TEXT,
+                    lang_nl TEXT,
+                    lang_el TEXT,
+                    lang_sk TEXT,
+                    lang_de TEXT,
+                    lang_it TEXT,
+                    lang_hi TEXT,
                     PRIMARY KEY (chat_id, message_id)
                 );
+                
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_nl TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_el TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_sk TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_de TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_it TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_hi TEXT;
                 
                 CREATE TABLE IF NOT EXISTS translated_messages (
                     chat_id BIGINT,
@@ -109,7 +122,7 @@ class Database:
                 );
                 
                 INSERT INTO bot_config (id, welcome_message, rules_message) 
-                VALUES (1, 'Welcome {mention} to symm.city! 🌆\n\n📜 Community Rules:\n- Be polite and respectful\n- No spam or unwanted advertising\n- Follow moderator instructions\n- Please use the appropriate topics for your discussions\n\n🎮 Enjoy your time in symm.city (symm.city)!', '📜 <b>symm.city Community Rules</b>:\n\n1. Be polite and respectful to all members.\n2. No spam, unsolicited DMs, or unwanted advertising.\n3. Keep conversations in the appropriate topic threads.\n4. Follow instructions from moderators.\n5. Visit symm.city for community links!') 
+                VALUES (1, 'Welcome {mention} to symm.city! 🌆\n\n📜 <b>symm.city Community Rules</b>:\n\n1. Be kind.\n2. Assume good intent.\n3. Be symmetrical.\n4. Be patient.\n5. Be <i>very</i> symmetrical.\n\nWe''re glad to have you here! 💚', '📜 <b>symm.city Community Rules</b>:\n\n1. Be kind.\n2. Assume good intent.\n3. Be symmetrical.\n4. Be patient.\n5. Be <i>very</i> symmetrical.') 
                 ON CONFLICT (id) DO NOTHING;
             """
             )
@@ -423,7 +436,10 @@ class Database:
             return None
 
         # Valid language codes matching our strict columns
-        valid_langs = {"en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr"}
+        valid_langs = {
+            "en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr",
+            "nl", "el", "sk", "de", "it", "hi"
+        }
         if lang_code not in valid_langs:
             return None
 
@@ -453,7 +469,10 @@ class Database:
         if not self.pool:
             return
 
-        valid_langs = {"en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr"}
+        valid_langs = {
+            "en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr",
+            "nl", "el", "sk", "de", "it", "hi"
+        }
         if lang_code not in valid_langs:
             return
 

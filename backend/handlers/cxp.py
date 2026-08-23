@@ -357,7 +357,7 @@ async def _announce_level_up(context: CallbackContext, user, new_level: int):
     cxp_topic_id = config.get("cxp_topic_id")
     main_group_id = config.get("main_group_id")
 
-    if cxp_topic_id and main_group_id:
+    if main_group_id:
         try:
             full_name = user.first_name + (
                 f" {user.last_name}" if getattr(user, "last_name", None) else ""
@@ -366,7 +366,7 @@ async def _announce_level_up(context: CallbackContext, user, new_level: int):
             msg = f"🎉 {mention} has reached <b>Level {new_level}</b>!"
             await context.bot.send_message(
                 chat_id=main_group_id,
-                message_thread_id=cxp_topic_id,
+                message_thread_id=cxp_topic_id if cxp_topic_id else None,
                 text=msg,
                 parse_mode="HTML",
             )
@@ -704,39 +704,7 @@ async def _delete_message_job(context: CallbackContext):
 async def enforce_cxp_topic(
     update: Update, context: CallbackContext, main_group_id, cxp_topic_id
 ) -> bool:
-    """Check if the command was used in the correct CXP topic, and if not, warn and delete."""
-    if not update.message:
-        return True
-
-    thread_id = update.message.message_thread_id
-    if update.effective_chat and update.effective_chat.is_forum and thread_id is None:
-        thread_id = 1
-
-    if thread_id != cxp_topic_id:
-        if main_group_id and cxp_topic_id and update.effective_chat.id == main_group_id:
-            try:
-                await update.message.delete()
-            except Exception:
-                pass
-
-            chat_id_str = str(main_group_id)
-            if chat_id_str.startswith("-100"):
-                chat_id_str = chat_id_str[4:]
-            topic_link = f"https://t.me/c/{chat_id_str}/{cxp_topic_id}"
-
-            msg = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                message_thread_id=update.message.message_thread_id,
-                text=f"This command only works in the [Bot Command Center]({topic_link}) topic.",
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-            )
-            context.job_queue.run_once(
-                _delete_message_job,
-                60,
-                data={"chat_id": msg.chat_id, "message_id": msg.message_id},
-            )
-        return False
+    """Topic enforcement disabled - commands are allowed in all topics and general chat."""
     return True
 
 
@@ -749,13 +717,6 @@ async def user_stats_cmd(update: Update, context: CallbackContext):
         getattr(update.effective_user, "is_bot", True)
         and not update.message.sender_chat
     ):
-        return
-
-    config = await db.get_config()
-    cxp_topic_id = config.get("cxp_topic_id") if config else None
-    main_group_id = config.get("main_group_id") if config else None
-
-    if not await enforce_cxp_topic(update, context, main_group_id, cxp_topic_id):
         return
 
     try:
@@ -786,16 +747,12 @@ async def user_stats_cmd(update: Update, context: CallbackContext):
         )
 
     # Check for reply targeting another user.
-    # Channels automatically "reply" to the root channel post when posting in the discussion group.
-    # Topics also automatically "reply" to the thread creation message.
-    # We must explicitly exclude `is_automatic_forward` and topic root messages.
     target_chat = None
     target_user = None
 
     if update.message.reply_to_message and not getattr(
         update.message, "is_automatic_forward", False
     ):
-        # If it's a forum topic, ignore the implicit reply to the topic starter message
         if (
             update.message.is_topic_message
             and update.message.reply_to_message.message_id
@@ -824,7 +781,6 @@ async def user_stats_cmd(update: Update, context: CallbackContext):
 
     # Check for arguments targeting another user
     if context.args:
-        # We are seeking a different user. Nullify the default target_id.
         arg_str = " ".join(context.args)
         resolved_id, resolved_name = await resolve_username(arg_str, update, context)
 
@@ -832,22 +788,20 @@ async def user_stats_cmd(update: Update, context: CallbackContext):
             target_id = resolved_id
             target_name = resolved_name
         else:
-            if main_group_id and cxp_topic_id:
-                await context.bot.send_message(
-                    chat_id=main_group_id,
-                    message_thread_id=cxp_topic_id,
-                    text="Could not resolve a target user from the arguments provided via Telegram. Please ensure the @username is correct.",
-                )
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                message_thread_id=update.message.message_thread_id,
+                text="Could not resolve a target user from the arguments provided via Telegram. Please ensure the @username is correct.",
+            )
             return
 
     user_data = await db.get_user(target_id)
     if not user_data:
-        if main_group_id and cxp_topic_id:
-            await context.bot.send_message(
-                chat_id=main_group_id,
-                message_thread_id=cxp_topic_id,
-                text="No stats found for that user.",
-            )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            message_thread_id=update.message.message_thread_id,
+            text="No stats found for that user.",
+        )
         return
 
     cxp = user_data.get("cxp", 0)
@@ -882,13 +836,12 @@ async def user_stats_cmd(update: Update, context: CallbackContext):
         f"✨ **CXP:** {cxp:,} / {next_level_cxp:,}"
     )
 
-    if main_group_id and cxp_topic_id:
-        await context.bot.send_message(
-            chat_id=main_group_id,
-            message_thread_id=cxp_topic_id,
-            text=msg,
-            parse_mode="Markdown",
-        )
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        message_thread_id=update.message.message_thread_id,
+        text=msg,
+        parse_mode="Markdown",
+    )
 
 
 def parse_leaderboard_args(args, config):
@@ -958,11 +911,6 @@ def parse_leaderboard_args(args, config):
 async def leaderboard_cmd(update: Update, context: CallbackContext):
     """Handler for /leaderboard. Shows top 10, skipping admins."""
     config = await db.get_config()
-    cxp_topic_id = config.get("cxp_topic_id") if config else None
-    main_group_id = config.get("main_group_id") if config else None
-
-    if not await enforce_cxp_topic(update, context, main_group_id, cxp_topic_id):
-        return
 
     try:
         await update.message.delete()
@@ -973,12 +921,11 @@ async def leaderboard_cmd(update: Update, context: CallbackContext):
 
     actual_top_10 = await db.get_leaderboard(limit=10, start_date=start_date, end_date=end_date)
     if not actual_top_10:
-        if main_group_id and cxp_topic_id:
-            await context.bot.send_message(
-                chat_id=main_group_id,
-                message_thread_id=cxp_topic_id,
-                text=f"The {title.lower()} is currently empty!",
-            )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            message_thread_id=update.message.message_thread_id,
+            text=f"The {title.lower()} is currently empty!",
+        )
         return
 
     msg = f"🏆 **{title} (Top 10)** 🏆\n\n"
@@ -1006,13 +953,12 @@ async def leaderboard_cmd(update: Update, context: CallbackContext):
         safe_name = escape_markdown(name, version=1)
         msg += f"{medal} **{safe_name}** — Level {level} ({cxp:,} CXP)\n"
 
-    if main_group_id and cxp_topic_id:
-        await context.bot.send_message(
-            chat_id=main_group_id,
-            message_thread_id=cxp_topic_id,
-            text=msg,
-            parse_mode="Markdown",
-        )
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        message_thread_id=update.message.message_thread_id,
+        text=msg,
+        parse_mode="Markdown",
+    )
 
 
 async def get_id_cmd(update: Update, context: CallbackContext):
@@ -1310,15 +1256,11 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     if not update.effective_user or not update.message:
         return
 
-    # Check if we are in the main group and cxp topic
+    # Check if we are in the main group
     config = await db.get_config()
     main_group_id = config.get("main_group_id") if config else None
-    cxp_topic_id = config.get("cxp_topic_id") if config else None
 
     if not main_group_id or update.effective_chat.id != main_group_id:
-        return
-
-    if not await enforce_cxp_topic(update, context, main_group_id, cxp_topic_id):
         return
 
     user_id = update.effective_user.id
@@ -1336,7 +1278,6 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     last_steal = user_data.get("last_steal_time")
     if last_steal:
         now = datetime.now()
-        # last_steal is likely a datetime object from asyncpg
         time_diff = now - last_steal
         remaining_seconds = 3600 - time_diff.total_seconds()
         if remaining_seconds > 0:
@@ -1344,8 +1285,8 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
             seconds = int(remaining_seconds % 60)
             safe_user_name = escape_markdown(user_name, version=1)
             await context.bot.send_message(
-                chat_id=main_group_id,
-                message_thread_id=cxp_topic_id,
+                chat_id=update.effective_chat.id,
+                message_thread_id=update.message.message_thread_id,
                 text=f"⏳ {safe_user_name}, you are on cooldown! Please wait `{minutes}m {seconds}s` before trying again.",
                 parse_mode="Markdown",
             )
@@ -1355,8 +1296,8 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     target_data = await db.get_random_user(user_id)
     if not target_data:
         await context.bot.send_message(
-            chat_id=main_group_id,
-            message_thread_id=cxp_topic_id,
+            chat_id=update.effective_chat.id,
+            message_thread_id=update.message.message_thread_id,
             text="There is no one available to steal from!",
         )
         return
@@ -1382,16 +1323,13 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
 
     # 3. Perform Steal
     if random.random() < 0.10:
-        if random.random() < 0.50:
-            msg = f"📡 Jammer detected! {user_name} failed to steal!"
-        else:
-            msg = f"🛡️ Shield detected! {user_name} failed to steal!"
+        msg = f"🛡️ Shield detected! {user_name} failed to steal!"
 
         await db.update_user_steal_time(user_id)
 
         await context.bot.send_message(
-            chat_id=main_group_id,
-            message_thread_id=cxp_topic_id,
+            chat_id=update.effective_chat.id,
+            message_thread_id=update.message.message_thread_id,
             text=msg,
         )
         return
@@ -1431,8 +1369,8 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     safe_user_name = escape_markdown(user_name, version=1)
     safe_target_name = escape_markdown(target_name, version=1)
     await context.bot.send_message(
-        chat_id=main_group_id,
-        message_thread_id=cxp_topic_id,
+        chat_id=update.effective_chat.id,
+        message_thread_id=update.message.message_thread_id,
         text=f"🎯 **{safe_user_name}** stole `{STEAL_AMOUNT}` CXP from **{safe_target_name}**!",
         parse_mode="Markdown",
     )
@@ -1532,32 +1470,22 @@ async def syncperms_cmd(update: Update, context: CallbackContext):
     if not update.effective_user or not update.message:
         return
         
-    config = await db.get_config()
-    main_group_id = config.get("main_group_id") if config else None
-    cxp_topic_id = config.get("cxp_topic_id") if config else None
-
-    if not await enforce_cxp_topic(update, context, main_group_id, cxp_topic_id):
-        return
-
-    # Check for admin permission
-    user_id = update.effective_user.id
-    bot_owner_id_str = os.getenv("BOT_OWNER_ID")
-    bot_owner_id = int(bot_owner_id_str) if bot_owner_id_str else 0
-    
     if user_id != bot_owner_id:
         user_data = await db.get_user(user_id)
         if not user_data or not user_data.get("is_admin"):
-            if main_group_id and cxp_topic_id:
-                msg = await context.bot.send_message(
-                    chat_id=main_group_id,
-                    message_thread_id=cxp_topic_id,
-                    text="❌ You do not have permission to use this command."
-                )
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                message_thread_id=update.message.message_thread_id,
+                text="❌ You do not have permission to use this command."
+            )
             return
 
     if not main_group_id:
-        if cxp_topic_id:
-            await context.bot.send_message(chat_id=update.message.chat_id, message_thread_id=cxp_topic_id, text="❌ Main group ID not configured. Cannot sync permissions.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            message_thread_id=update.message.message_thread_id,
+            text="❌ Main group ID not configured. Cannot sync permissions."
+        )
         return
 
     await update.message.reply_text(

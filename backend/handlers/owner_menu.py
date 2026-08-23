@@ -264,10 +264,9 @@ async def get_admin_channel(update: Update, context: CallbackContext) -> int:
 
     await update.message.reply_text(
         f"✅ Validated Admin Group (ID: `{admin_group_id}`)\n\n"
-        "Now, please provide the link to the **CXP Dedicated Topic** inside the main group.\n"
-        "You can get this by going to your main group, right clicking on the topic, and selecting 'Copy Link'.\n"
-        "Alternatively, you can forward any message from that topic to me.\n\n"
-        "Please send the topic link or forwarded message now:",
+        "If your group has forum topics enabled, please send the link to your **CXP Topic** or forward a message from it.\n\n"
+        "If your group has only a single chat thread without topics, simply type `skip`.\n\n"
+        "Please send the topic link or type `skip` now:",
         parse_mode="Markdown",
     )
     return CXP_TOPIC
@@ -275,14 +274,16 @@ async def get_admin_channel(update: Update, context: CallbackContext) -> int:
 
 async def get_cxp_topic(update: Update, context: CallbackContext) -> int:
     """Handle CXP topic input, save config to database, and finish."""
-    topic_id = await _extract_topic_id(update.message)
-
-    if topic_id is None:
-        await update.message.reply_text(
-            "Could not extract a Topic ID. Please send a valid topic link (e.g. https://t.me/c/1234/56) "
-            "or forward a message directly from the topic."
-        )
-        return CXP_TOPIC
+    text_input = update.message.text.strip().lower() if update.message.text else ""
+    if text_input in ("skip", "none", "no"):
+        topic_id = None
+    else:
+        topic_id = await _extract_topic_id(update.message)
+        if topic_id is None:
+            await update.message.reply_text(
+                "Could not extract a Topic ID. Please send a valid topic link, forward a message, or type `skip` if you don't use topics."
+            )
+            return CXP_TOPIC
 
     main_group_id = context.user_data.get("main_group")
     channel_id = context.user_data.get("public_channel")
@@ -298,13 +299,14 @@ async def get_cxp_topic(update: Update, context: CallbackContext) -> int:
         if not success:
             raise Exception(f"Database returned False. Pool is None: {db.pool is None}")
 
+        topic_display = f"`{topic_id}`" if topic_id else "None (Single-thread mode)"
         await update.message.reply_text(
             "Configuration Complete!\n\n"
-            "I have updated the database with the following IDs:\n"
+            "I have updated the database with the following settings:\n"
             f"- Main Group: {main_group_id}\n"
             f"- Channel: {channel_id}\n"
             f"- Admin Group: {admin_group_id}\n"
-            f"- CXP Topic ID: {topic_id}\n\n"
+            f"- CXP Topic ID: {topic_display}\n\n"
             "Please ensure I have been added to all of these with ALL permissions (except anonymous).\n"
             "Have a great day!"
         )
@@ -655,21 +657,25 @@ async def prompt_edit_cxp(update: Update, context: CallbackContext) -> int:
 
 
 async def save_edit_cxp(update: Update, context: CallbackContext) -> int:
-    """Save the new CXP Topic ID."""
-    topic_id = await _extract_topic_id(update.message)
-
-    if topic_id is None:
-        await update.message.reply_text(
-            "Could not extract a Topic ID. Please send a valid topic link or forward a message."
-        )
-        return EDIT_CXP
+    """Save the new CXP Topic ID or clear it."""
+    text_input = update.message.text.strip().lower() if update.message.text else ""
+    if text_input in ("none", "clear", "disable", "skip"):
+        topic_id = None
+    else:
+        topic_id = await _extract_topic_id(update.message)
+        if topic_id is None:
+            await update.message.reply_text(
+                "Could not extract a Topic ID. Please send a valid topic link, forward a message, or type `none` to disable topic restriction."
+            )
+            return EDIT_CXP
 
     try:
         success = await db.update_config(cxp_topic_id=topic_id)
         if not success:
             raise Exception(f"Database returned False. Pool is None: {db.pool is None}")
+        display_str = f"ID: `{topic_id}`" if topic_id else "Disabled (Single-thread mode)"
         await update.message.reply_text(
-            f"✅ CXP Topic updated successfully (ID: `{topic_id}`).",
+            f"✅ CXP Topic updated successfully ({display_str}).",
             parse_mode="Markdown",
         )
     except Exception as e:

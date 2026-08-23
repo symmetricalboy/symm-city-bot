@@ -49,6 +49,12 @@ from handlers.translation import (
     translate_tr_cmd,
     translate_fr_cmd,
     translate_uk_cmd,
+    translate_nl_cmd,
+    translate_el_cmd,
+    translate_sk_cmd,
+    translate_de_cmd,
+    translate_it_cmd,
+    translate_hi_cmd,
     translate_interactive_cmd,
     translate_callback,
 )
@@ -229,6 +235,12 @@ def main() -> None:
     application.add_handler(CommandHandler("tr", translate_tr_cmd))
     application.add_handler(CommandHandler("fr", translate_fr_cmd))
     application.add_handler(CommandHandler("uk", translate_uk_cmd))
+    application.add_handler(CommandHandler("nl", translate_nl_cmd))
+    application.add_handler(CommandHandler("el", translate_el_cmd))
+    application.add_handler(CommandHandler("sk", translate_sk_cmd))
+    application.add_handler(CommandHandler("de", translate_de_cmd))
+    application.add_handler(CommandHandler("it", translate_it_cmd))
+    application.add_handler(CommandHandler("hi", translate_hi_cmd))
     application.add_handler(CommandHandler("translate", translate_interactive_cmd))
 
     # Moderation Handlers

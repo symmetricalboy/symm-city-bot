@@ -6,7 +6,7 @@ from telegram.ext import CallbackContext
 from google import genai
 import html
 from database import db
-from handlers.cxp import enforce_cxp_topic
+
 
 # Import our knowledge base and prompts
 from ai_library import ANSWER_GENERATION_PROMPT, get_relevant_context
@@ -79,12 +79,7 @@ async def ask_cmd(update: Update, context: CallbackContext):
         )
         return
 
-    config = await db.get_config()
-    cxp_topic_id = config.get("cxp_topic_id") if config else None
-    main_group_id = config.get("main_group_id") if config else None
 
-    if not await enforce_cxp_topic(update, context, main_group_id, cxp_topic_id):
-        return
 
     thread_id = update.message.message_thread_id
     chat_id = update.effective_chat.id

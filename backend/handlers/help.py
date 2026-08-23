@@ -60,9 +60,10 @@ async def commands_cmd(update: Update, context: CallbackContext):
         "• `/ping` — Check bot response latency and connection method.\n\n"
         "**Translation Commands:**\n"
         "Start or reply to a message with a language code:\n"
-        "`/en` (English), `/es` (Spanish), `/fr` (French),\n"
-        "`/pt` (Portuguese), `/id` (Indonesian), `/fa` (Persian),\n"
-        "`/ru` (Russian), `/uk` (Ukrainian), `/tr` (Turkish).\n"
+        "`/en` (English), `/es` (Spanish), `/fr` (French), `/de` (German),\n"
+        "`/it` (Italian), `/nl` (Dutch), `/pt` (Portuguese), `/ru` (Russian),\n"
+        "`/uk` (Ukrainian), `/el` (Greek), `/sk` (Slovak), `/tr` (Turkish),\n"
+        "`/fa` (Persian), `/id` (Indonesian), `/hi` (Hindi).\n"
         "Or reply with `/translate` for an interactive menu."
     )
     try:
@@ -85,11 +86,11 @@ async def rules_cmd(update: Update, context: CallbackContext):
     if not msg_text:
         msg_text = (
             "📜 <b>symm.city Community Rules</b>:\n\n"
-            "1. Be polite and respectful to all members.\n"
-            "2. No spam, unsolicited DMs, or unwanted advertising.\n"
-            "3. Keep conversations in the appropriate topic threads.\n"
-            "4. Follow instructions from moderators.\n"
-            "5. Visit <b>symm.city</b> for community links!"
+            "1. Be kind.\n"
+            "2. Assume good intent.\n"
+            "3. Be symmetrical.\n"
+            "4. Be patient.\n"
+            "5. Be <i>very</i> symmetrical."
         )
 
     try:

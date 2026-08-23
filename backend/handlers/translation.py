@@ -211,12 +211,18 @@ async def _translate_message(
                 "English": "🇺🇸 [EN]",
                 "Spanish": "🇲🇽 [ES]",
                 "French": "🇫🇷 [FR]",
+                "German": "🇩🇪 [DE]",
+                "Italian": "🇮🇹 [IT]",
+                "Dutch": "🇳🇱 [NL]",
                 "Portuguese": "🇵🇹 [PT]",
-                "Indonesian": "🇮🇩 [ID]",
-                "Persian": "🇮🇷 [FA]",
                 "Russian": "🇷🇺 [RU]",
                 "Ukrainian": "🇺🇦 [UK]",
+                "Greek": "🇬🇷 [EL]",
+                "Slovak": "🇸🇰 [SK]",
                 "Turkish": "🇹🇷 [TR]",
+                "Persian": "🇮🇷 [FA]",
+                "Indonesian": "🇮🇩 [ID]",
+                "Hindi": "🇮🇳 [HI]",
             }
             lang_header = flag_map.get(target_language, f"[{target_language}]")
 
@@ -336,6 +342,30 @@ async def translate_tr_cmd(update: Update, context: CallbackContext):
 
 async def translate_uk_cmd(update: Update, context: CallbackContext):
     await _translate_message(update, context, "Ukrainian", "uk")
+
+
+async def translate_nl_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Dutch", "nl")
+
+
+async def translate_el_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Greek", "el")
+
+
+async def translate_sk_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Slovak", "sk")
+
+
+async def translate_de_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "German", "de")
+
+
+async def translate_it_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Italian", "it")
+
+
+async def translate_hi_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Hindi", "hi")
 
 
 async def _delete_message_job(context: CallbackContext):
@@ -469,24 +499,46 @@ async def translate_interactive_cmd(update: Update, context: CallbackContext):
         ],
         [
             InlineKeyboardButton(
-                "🇵🇹 [PT]", callback_data=f"tr_{chat_id}_{message_id}_pt"
+                "🇩🇪 [DE]", callback_data=f"tr_{chat_id}_{message_id}_de"
             ),
             InlineKeyboardButton(
-                "🇮🇩 [ID]", callback_data=f"tr_{chat_id}_{message_id}_id"
+                "🇮🇹 [IT]", callback_data=f"tr_{chat_id}_{message_id}_it"
             ),
             InlineKeyboardButton(
-                "🇮🇷 [FA]", callback_data=f"tr_{chat_id}_{message_id}_fa"
+                "🇳🇱 [NL]", callback_data=f"tr_{chat_id}_{message_id}_nl"
             ),
         ],
         [
+            InlineKeyboardButton(
+                "🇵🇹 [PT]", callback_data=f"tr_{chat_id}_{message_id}_pt"
+            ),
             InlineKeyboardButton(
                 "🇷🇺 [RU]", callback_data=f"tr_{chat_id}_{message_id}_ru"
             ),
             InlineKeyboardButton(
                 "🇺🇦 [UK]", callback_data=f"tr_{chat_id}_{message_id}_uk"
             ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🇬🇷 [EL]", callback_data=f"tr_{chat_id}_{message_id}_el"
+            ),
+            InlineKeyboardButton(
+                "🇸🇰 [SK]", callback_data=f"tr_{chat_id}_{message_id}_sk"
+            ),
             InlineKeyboardButton(
                 "🇹🇷 [TR]", callback_data=f"tr_{chat_id}_{message_id}_tr"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🇮🇷 [FA]", callback_data=f"tr_{chat_id}_{message_id}_fa"
+            ),
+            InlineKeyboardButton(
+                "🇮🇩 [ID]", callback_data=f"tr_{chat_id}_{message_id}_id"
+            ),
+            InlineKeyboardButton(
+                "🇮🇳 [HI]", callback_data=f"tr_{chat_id}_{message_id}_hi"
             ),
         ],
     ]
@@ -535,12 +587,18 @@ async def translate_callback(update: Update, context: CallbackContext):
         "en": "English",
         "es": "Spanish",
         "fr": "French",
+        "de": "German",
+        "it": "Italian",
+        "nl": "Dutch",
         "pt": "Portuguese",
-        "id": "Indonesian",
-        "fa": "Persian",
         "ru": "Russian",
         "uk": "Ukrainian",
+        "el": "Greek",
+        "sk": "Slovak",
         "tr": "Turkish",
+        "fa": "Persian",
+        "id": "Indonesian",
+        "hi": "Hindi",
     }
 
     target_language = lang_map.get(lang_code)
@@ -605,12 +663,18 @@ async def translate_callback(update: Update, context: CallbackContext):
         "English": "🇺🇸 [EN]",
         "Spanish": "🇲🇽 [ES]",
         "French": "🇫🇷 [FR]",
+        "German": "🇩🇪 [DE]",
+        "Italian": "🇮🇹 [IT]",
+        "Dutch": "🇳🇱 [NL]",
         "Portuguese": "🇵🇹 [PT]",
-        "Indonesian": "🇮🇩 [ID]",
-        "Persian": "🇮🇷 [FA]",
         "Russian": "🇷🇺 [RU]",
         "Ukrainian": "🇺🇦 [UK]",
+        "Greek": "🇬🇷 [EL]",
+        "Slovak": "🇸🇰 [SK]",
         "Turkish": "🇹🇷 [TR]",
+        "Persian": "🇮🇷 [FA]",
+        "Indonesian": "🇮🇩 [ID]",
+        "Hindi": "🇮🇳 [HI]",
     }
     lang_header = flag_map.get(target_language, f"[{target_language}]")
 
