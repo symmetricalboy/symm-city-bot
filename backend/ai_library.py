@@ -28,7 +28,7 @@ SYMM_CITY_KNOWLEDGE = """
   - Built for Android (phone, tablet, Play Games for Windows, Chromebook, Android TV) with custom Bluetooth controller mapping (e.g. Taiko drums, DDR mats, gamepads).
   - Features real-time multiplayer versus modes, ranking systems, leaderboards, stats, sound effects & original music, offline AI bots, and Wi-Fi Direct local multiplayer.
 - **Tech, AI & Software Interests**:
-  - Passionate developer experimenting with AI (Gemini 3.7 Flash, Claude Sonnet, Cursor, local models, Live API, image/video generation).
+  - Passionate developer experimenting with AI (Gemini 3.8 Flash, Claude Sonnet, Cursor, local models, Live API, image/video generation).
   - Creates tools for Bluesky (Lexicons, alt-text bots, AT Protocol tools), Telegram bots, and web applications.
   - Enjoys creative coding, robotics/automation, Android ecosystem, and UI/UX design.
 
@@ -44,7 +44,7 @@ SYMM_CITY_KNOWLEDGE = """
 - **CXP System (Community XP)**: Earn 50 CXP per chat message (1 min cooldown). Positive emoji reactions give +50 CXP; negative emoji reactions give -50 CXP. Higher-level members have higher reaction multipliers!
 - **Level Titles**: Budding Symmetry (1-4), Bilateral Balance (5-9), Rotational Harmony (10-19), Crystalline Order (20-29), Exquisitely Symmetrical (30-39), Supersymmetric (40-49), Very Symmetrical (50-59), Pure Symmetry (60+).
 - **CXP Commands**: `/level` (view stats & rank), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown).
-- **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, or `/translate` for an interactive menu.
+- **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, `/da`, `/ja`, `/ar`, or `/translate` for an interactive menu.
 - **Time Zone Commands**: `/settime <location>` (save your time zone), `/time <location | @username>` (check current time anywhere or for another member; defaults to symm.city time).
 - **Moderation & Alerts**: Mention `@admin` in the group to ping all administrators. Moderation tools include `/mute`, `/unmute`, `/kick`, `/ban`.
 - **Channel Post Drafting**: Authorized channel admins can use `/draft` in DM to format and preview posts with custom URL buttons.

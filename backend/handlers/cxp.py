@@ -373,12 +373,6 @@ async def track_message_activity(update: Update, context: CallbackContext):
                             f"You are posting as a channel that is not linked to your user account. This means you will not earn CXP.\n\n"
                             f"Please click the button below to link it.",
                             reply_markup=keyboard,
-                            parse_mode="Markdown"
-                        )
-                        context.job_queue.run_once(
-                            _delete_message_job,
-                            60,
-                            data={"chat_id": msg.chat_id, "message_id": msg.message_id}
                         )
                     except Exception as e:
                         logger.error(f"Failed to send unlinked channel warning: {e}")
@@ -581,10 +575,6 @@ async def user_stats_cmd(update: Update, context: CallbackContext):
     ):
         return
 
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.warning(f"Failed to delete /level message: {e}")
 
     if getattr(update.effective_user, "is_bot", True) and update.message.sender_chat:
         target_id = update.message.sender_chat.id
@@ -774,10 +764,6 @@ async def leaderboard_cmd(update: Update, context: CallbackContext):
     """Handler for /leaderboard. Shows top 10, skipping admins."""
     config = await db.get_config()
 
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.warning(f"Failed to delete /leaderboard message: {e}")
 
     start_date, end_date, title = parse_leaderboard_args(context.args, config)
 
@@ -1126,10 +1112,6 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
         f" {update.effective_user.last_name}" if update.effective_user.last_name else ""
     )
 
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.warning(f"Failed to delete /steal message: {e}")
 
     # 1. Check Cooldown
     user_data = await db.get_user(user_id)

@@ -87,7 +87,7 @@ async def resolve_location(location_str: str) -> dict:
 
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-3.7-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
         data = response.text.strip()
@@ -235,13 +235,6 @@ async def time_cmd(update: Update, context: CallbackContext):
     try:
         tz_info = ZoneInfo(resolved_location["timezone"])
 
-        # We need to delete the user's message and send the response in the same topic thread.
-        try:
-            await context.bot.delete_message(
-                chat_id=chat_id, message_id=original_message_id
-            )
-        except Exception as e:
-            logger.warning("Failed to delete the original /time command message: %s", e)
 
         # Generate output string using standard packages
         answer_text = format_time_string(

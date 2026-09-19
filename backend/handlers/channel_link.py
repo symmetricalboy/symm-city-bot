@@ -92,9 +92,3 @@ async def set_channel_cmd(update: Update, context: CallbackContext):
             f"All CXP earned by this channel will now be credited to you.",
             parse_mode="Markdown"
         )
-        
-        # Delete the command message to keep chat clean
-        try:
-            await update.message.delete()
-        except Exception:
-            pass

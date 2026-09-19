@@ -12,7 +12,7 @@ async def help_cmd(update: Update, context: CallbackContext):
         "**Features:**\n"
         "• **CXP System**: Earn Community Experience Points (CXP) by chatting and reacting to messages. Level up to gain reaction influence and titles!\n"
         "• **Leaderboards & Contests**: Compete for top spots globally or during special contests (`/leaderboard`, `/contest`).\n"
-        "• **Translations**: Quick commands (`/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`) and interactive menu (`/translate`).\n"
+        "• **Translations**: Quick commands (`/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, `/da`, `/ja`, `/ar`) and interactive menu (`/translate`).\n"
         "• **Time Zones**: Look up times worldwide or check member times (`/time`, `/settime`).\n"
         "• **AI Assistant**: Grounded in symm's project history & Bluesky archive (`/ask <question>`).\n\n"
         "**Earning CXP:**\n"
@@ -30,10 +30,6 @@ async def help_cmd(update: Update, context: CallbackContext):
         "• **Lvl 60+:** Pure Symmetry\n\n"
         "To view all commands, type `/commands`. Visit **symm.city**!"
     )
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -63,13 +59,10 @@ async def commands_cmd(update: Update, context: CallbackContext):
         "`/en` (English), `/es` (Spanish), `/fr` (French), `/de` (German),\n"
         "`/it` (Italian), `/nl` (Dutch), `/pt` (Portuguese), `/ru` (Russian),\n"
         "`/uk` (Ukrainian), `/el` (Greek), `/sk` (Slovak), `/tr` (Turkish),\n"
-        "`/fa` (Persian), `/id` (Indonesian), `/hi` (Hindi).\n"
+        "`/fa` (Persian), `/id` (Indonesian), `/hi` (Hindi),\n"
+        "`/da` (Dari), `/ja` (Japanese), `/ar` (Arabic).\n"
         "Or reply with `/translate` for an interactive menu."
     )
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -80,7 +73,7 @@ async def commands_cmd(update: Update, context: CallbackContext):
 
 
 async def rules_cmd(update: Update, context: CallbackContext):
-    """Handler for /rules to show the rules message. Auto-deletes after 5 minutes."""
+    """Handler for /rules to show the rules message."""
     config = await db.get_config()
     msg_text = config.get("rules_message") if config else None
     if not msg_text:
@@ -93,10 +86,6 @@ async def rules_cmd(update: Update, context: CallbackContext):
             "5. Be <i>very</i> symmetrical."
         )
 
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
 
     reply_msg = await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -105,12 +94,4 @@ async def rules_cmd(update: Update, context: CallbackContext):
         parse_mode="HTML",
     )
 
-    # Schedule deletion of the bot's reply after 5 minutes
-    async def delete_later():
-        await asyncio.sleep(300)
-        try:
-            await reply_msg.delete()
-        except Exception:
-            pass
 
-    asyncio.create_task(delete_later())

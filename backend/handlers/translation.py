@@ -145,10 +145,6 @@ async def _translate_message(
         )
         return
 
-    try:
-        await update.message.delete()
-    except Exception as e:  # pylint: disable=broad-except
-        logger.warning("Failed to delete translation command message: %s", e)
 
     if not gemini_client:
         await context.bot.send_message(
@@ -187,7 +183,7 @@ async def _translate_message(
         prompt = f"Translate this message into {target_language}. Respond ONLY with the translated text, no additional commentary. Preserve any existing formatting and adapt it to Telegram HTML (use <b>, <i>, <a>, <code>, <pre>). Do not wrap the response in markdown code blocks:\n\n{text_to_translate}"
 
         response = gemini_client.models.generate_content(
-            model="gemini-3.7-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
 
@@ -223,6 +219,9 @@ async def _translate_message(
                 "Persian": "🇮🇷 [FA]",
                 "Indonesian": "🇮🇩 [ID]",
                 "Hindi": "🇮🇳 [HI]",
+                "Dari": "🇦🇫 [DA]",
+                "Japanese": "🇯🇵 [JA]",
+                "Arabic": "🇸🇦 [AR]",
             }
             lang_header = flag_map.get(target_language, f"[{target_language}]")
 
@@ -277,17 +276,7 @@ async def _translate_message(
                 update.effective_chat.id, root_msg_id, text_to_translate
             )
 
-            # Auto-delete the newly generated translation message after 60 seconds
-            # ONLY if it was generated as a reply (not a permanent inline stand-alone).
-            if should_reply_to_target and not context.args:
-                context.job_queue.run_once(
-                    _delete_message_job,
-                    60,
-                    data={
-                        "chat_id": sent_msg.chat_id,
-                        "message_id": sent_msg.message_id,
-                    },
-                )
+
         else:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -368,6 +357,22 @@ async def translate_hi_cmd(update: Update, context: CallbackContext):
     await _translate_message(update, context, "Hindi", "hi")
 
 
+async def translate_da_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Dari", "da")
+
+
+async def translate_dr_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Dari", "da")
+
+
+async def translate_ja_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Japanese", "ja")
+
+
+async def translate_ar_cmd(update: Update, context: CallbackContext):
+    await _translate_message(update, context, "Arabic", "ar")
+
+
 async def _delete_message_job(context: CallbackContext):
     """Job to automatically delete a message."""
     chat_id = context.job.data.get("chat_id")
@@ -401,10 +406,6 @@ async def translate_interactive_cmd(update: Update, context: CallbackContext):
         reply = None
 
     if not reply or context.args:
-        try:
-            await update.message.delete()
-        except Exception:  # pylint: disable=broad-except
-            pass
 
         thread_id = update.message.message_thread_id
         if thread_id is None and update.message.reply_to_message:
@@ -427,18 +428,8 @@ async def translate_interactive_cmd(update: Update, context: CallbackContext):
             ),
             parse_mode="Markdown",
         )
-        context.job_queue.run_once(
-            _delete_message_job,
-            60,
-            data={"chat_id": msg.chat_id, "message_id": msg.message_id},
-        )
         return
 
-    # Delete command message
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
 
     thread_id = update.message.message_thread_id
     if thread_id is None and reply:
@@ -458,11 +449,6 @@ async def translate_interactive_cmd(update: Update, context: CallbackContext):
             chat_id=update.effective_chat.id,
             message_thread_id=send_thread_id,
             text="The replied message does not contain text.",
-        )
-        context.job_queue.run_once(
-            _delete_message_job,
-            60,
-            data={"chat_id": msg.chat_id, "message_id": msg.message_id},
         )
         return
 
@@ -541,6 +527,17 @@ async def translate_interactive_cmd(update: Update, context: CallbackContext):
                 "🇮🇳 [HI]", callback_data=f"tr_{chat_id}_{message_id}_hi"
             ),
         ],
+        [
+            InlineKeyboardButton(
+                "🇦🇫 [DA]", callback_data=f"tr_{chat_id}_{message_id}_da"
+            ),
+            InlineKeyboardButton(
+                "🇯🇵 [JA]", callback_data=f"tr_{chat_id}_{message_id}_ja"
+            ),
+            InlineKeyboardButton(
+                "🇸🇦 [AR]", callback_data=f"tr_{chat_id}_{message_id}_ar"
+            ),
+        ],
     ]
 
     msg = await context.bot.send_message(
@@ -551,12 +548,6 @@ async def translate_interactive_cmd(update: Update, context: CallbackContext):
         reply_to_message_id=reply.message_id,
     )
 
-    # Auto delete the menu after 1 minute
-    context.job_queue.run_once(
-        _delete_message_job,
-        60,
-        data={"chat_id": msg.chat_id, "message_id": msg.message_id},
-    )
 
 
 async def translate_callback(update: Update, context: CallbackContext):
@@ -599,6 +590,10 @@ async def translate_callback(update: Update, context: CallbackContext):
         "fa": "Persian",
         "id": "Indonesian",
         "hi": "Hindi",
+        "da": "Dari",
+        "dr": "Dari",
+        "ja": "Japanese",
+        "ar": "Arabic",
     }
 
     target_language = lang_map.get(lang_code)
@@ -675,6 +670,9 @@ async def translate_callback(update: Update, context: CallbackContext):
         "Persian": "🇮🇷 [FA]",
         "Indonesian": "🇮🇩 [ID]",
         "Hindi": "🇮🇳 [HI]",
+        "Dari": "🇦🇫 [DA]",
+        "Japanese": "🇯🇵 [JA]",
+        "Arabic": "🇸🇦 [AR]",
     }
     lang_header = flag_map.get(target_language, f"[{target_language}]")
 
@@ -740,7 +738,7 @@ async def translate_callback(update: Update, context: CallbackContext):
         prompt = f"Translate this message into {target_language}. Respond ONLY with the translated text, no additional commentary. Preserve any existing formatting and adapt it to Telegram HTML (use <b>, <i>, <a>, <code>, <pre>). Do not wrap the response in markdown code blocks:\n\n{original_text}"
 
         response = gemini_client.models.generate_content(
-            model="gemini-3.7-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
         )
 
@@ -782,13 +780,7 @@ async def translate_callback(update: Update, context: CallbackContext):
             # Unconditionally save the pure original string under the root ID
             await db.save_original_translation_text(chat_id, root_msg_id, original_text)
 
-            # Auto-delete the newly generated translation message after 60 seconds
-            # since interactive callbacks are always executed as replies.
-            context.job_queue.run_once(
-                _delete_message_job,
-                60,
-                data={"chat_id": sent_msg.chat_id, "message_id": sent_msg.message_id},
-            )
+
         else:
             await query.answer("Failed to generate translation.", show_alert=True)
 

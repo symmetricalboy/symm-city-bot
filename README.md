@@ -2,7 +2,7 @@
 
 [@symmcitybot](https://t.me/symmcitybot) | [symm.city](https://symm.city)
 
-A powerful, modular Telegram bot designed for the **symm.city** community. Built with Python, `python-telegram-bot` (v22+), FastAPI, PostgreSQL (`asyncpg`), and Google Gemini (`gemini-3.7-flash`).
+A powerful, modular Telegram bot designed for the **symm.city** community. Built with Python, `python-telegram-bot` (v22+), FastAPI, PostgreSQL (`asyncpg`), and Google Gemini (`gemini-3.8-flash`).
 
 ---
 
@@ -28,13 +28,12 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
 
 ### 🤖 Grounded AI Assistant (`/ask`)
 - **Grounded in Bluesky History**: Grounded in symmetricalboy's full Bluesky post archive using BM25 semantic retrieval, plus core knowledge of symm's projects (Symmetris, music, software, tech).
-- **Powered by Gemini 3.7 Flash**: High-speed, accurate responses tailored to community inquiries.
-- **Clean Chat**: Automatically cleans up the command and response after 60 seconds to avoid cluttering discussion topics.
+- **Powered by Gemini 3.8 Flash**: High-speed, accurate responses tailored to community inquiries.
 
 ### 🌐 Translation & Internationalization
-- **Quick Translation**: Start or reply to a message with a language code command to instantly translate it (e.g. `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`).
+- **Quick Translation**: Start or reply to a message with a language code command to instantly translate it (e.g. `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, `/da`, `/ja`, `/ar`).
 - **Interactive Menu**: Reply to any message with `/translate` to open an inline button menu with language options.
-- **Smart Formatting**: Powered by `gemini-3.7-flash`, preserving Telegram HTML tags and original author attribution.
+- **Smart Formatting**: Powered by `gemini-3.8-flash`, preserving Telegram HTML tags and original author attribution.
 
 ### ⏰ Time Zone Management
 - **Check Times**: Easily check the exact time for a specific location (`/time London`), symm.city default (`/time`), or another user (`/time @username`).
@@ -56,7 +55,7 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
 - **Python 3.14+** & [Poetry](https://python-poetry.org/docs/#installation)
 - **PostgreSQL Database**
 - **Telegram Bot Token** (obtain from [@BotFather](https://t.me/BotFather))
-- **Google Gemini API Key** (for `gemini-3.7-flash` AI & translation features)
+- **Google Gemini API Key** (for `gemini-3.8-flash` AI & translation features)
 
 ---
 

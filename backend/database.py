@@ -89,6 +89,9 @@ class Database:
                     lang_de TEXT,
                     lang_it TEXT,
                     lang_hi TEXT,
+                    lang_da TEXT,
+                    lang_ja TEXT,
+                    lang_ar TEXT,
                     PRIMARY KEY (chat_id, message_id)
                 );
                 
@@ -98,6 +101,9 @@ class Database:
                 ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_de TEXT;
                 ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_it TEXT;
                 ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_hi TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_da TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_ja TEXT;
+                ALTER TABLE translations ADD COLUMN IF NOT EXISTS lang_ar TEXT;
                 
                 CREATE TABLE IF NOT EXISTS translated_messages (
                     chat_id BIGINT,
@@ -508,7 +514,7 @@ class Database:
         # Valid language codes matching our strict columns
         valid_langs = {
             "en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr",
-            "nl", "el", "sk", "de", "it", "hi"
+            "nl", "el", "sk", "de", "it", "hi", "da", "ja", "ar"
         }
         if lang_code not in valid_langs:
             return None
@@ -541,7 +547,7 @@ class Database:
 
         valid_langs = {
             "en", "es", "fr", "pt", "id", "fa", "ru", "uk", "tr",
-            "nl", "el", "sk", "de", "it", "hi"
+            "nl", "el", "sk", "de", "it", "hi", "da", "ja", "ar"
         }
         if lang_code not in valid_langs:
             return

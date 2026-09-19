@@ -53,7 +53,7 @@ async def ask_cmd(update: Update, context: CallbackContext):
     """
     Handle the /ask command.
     Retrieves grounded context from symm's Bluesky post history & core knowledge,
-    then generates a response with gemini-3.7-flash.
+    then generates a response with gemini-3.8-flash.
     """
     if not update.effective_user or not update.message:
         return
@@ -116,13 +116,13 @@ async def ask_cmd(update: Update, context: CallbackContext):
         user_obj = update.effective_user
         ai_username = user_obj.username or user_obj.first_name
 
-        # Step 3: Answer Generation using gemini-3.7-flash
+        # Step 3: Answer Generation using gemini-3.8-flash
         generation_prompt = ANSWER_GENERATION_PROMPT.format(
             context=context_data, question=question, username=ai_username
         )
 
         final_response = gemini_client.models.generate_content(
-            model="gemini-3.7-flash",
+            model="gemini-3.8-flash",
             contents=generation_prompt,
         )
 
@@ -140,15 +140,6 @@ async def ask_cmd(update: Update, context: CallbackContext):
             reply_to_message_id=update.message.message_id,
         )
 
-        # Schedule auto-delete for original command and response after 60 seconds
-        context.job_queue.run_once(
-            _delete_messages_job,
-            60,
-            data={
-                "chat_id": chat_id,
-                "message_ids": [update.message.message_id, sent_msg.message_id],
-            },
-        )
 
     except Exception as e:
         logger.error(f"Error handling /ask command: {e}")
