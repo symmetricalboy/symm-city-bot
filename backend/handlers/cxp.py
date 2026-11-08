@@ -1096,7 +1096,7 @@ async def set_admin_cmd(update: Update, context: CallbackContext):
 
 
 async def steal_cxp_cmd(update: Update, context: CallbackContext):
-    """Member command: /steal. Steal 25-100 CXP from a random user with 1-hour cooldown."""
+    """Member command: /steal. Steal up to 25-100 CXP from a random user with >= 1 CXP (1-hour cooldown)."""
     if not update.effective_user or not update.message:
         return
 
@@ -1107,20 +1107,71 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
     if not main_group_id or update.effective_chat.id != main_group_id:
         return
 
-    user_id = update.effective_user.id
-    user_name = update.effective_user.first_name + (
-        f" {update.effective_user.last_name}" if update.effective_user.last_name else ""
+    if getattr(update.effective_user, "is_bot", True):
+        if not update.message.sender_chat:
+            return
+        sender_chat = update.message.sender_chat
+        if getattr(sender_chat, "type", "") != "channel":
+            return
+        owner_id = await db.get_channel_owner(sender_chat.id)
+        if not owner_id:
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            bot_username = context.bot.username
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🔗 Link Channel",
+                            url=f"https://t.me/{bot_username}?start=setchannel",
+                        )
+                    ]
+                ]
+            )
+            await update.message.reply_text(
+                "⚠️ Please link your channel to your user account first before using `/steal`.",
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+            return
+        user_id = owner_id
+        db_user = await db.get_user(owner_id)
+        user_name = (
+            (db_user.get("display_name") if db_user else None)
+            or sender_chat.title
+            or f"User {owner_id}"
+        )
+
+        class _MockStealUser:
+            def __init__(self, uid: int, name: str):
+                self.id = uid
+                self.first_name = name
+                self.last_name = None
+                self.is_bot = False
+
+        user_obj = _MockStealUser(user_id, user_name)
+    else:
+        user_id = update.effective_user.id
+        user_name = update.effective_user.first_name + (
+            f" {update.effective_user.last_name}"
+            if update.effective_user.last_name
+            else ""
+        )
+        user_obj = update.effective_user
+
+    desired_amount = random.randint(25, 100)
+    shielded = random.random() < 0.10
+
+    res = await db.attempt_steal(
+        thief_id=user_id,
+        desired_amount=desired_amount,
+        shielded=shielded,
     )
 
-
-    # 1. Check Cooldown
-    user_data = await db.get_user(user_id)
-    last_steal = user_data.get("last_steal_time")
-    if last_steal:
-        now = datetime.now()
-        time_diff = now - last_steal
-        remaining_seconds = 3600 - time_diff.total_seconds()
-        if remaining_seconds > 0:
+    if not res.get("ok"):
+        reason = res.get("reason")
+        if reason == "cooldown":
+            remaining_seconds = res.get("remaining_seconds", 0)
             minutes = int(remaining_seconds // 60)
             seconds = int(remaining_seconds % 60)
             safe_user_name = escape_markdown(user_name, version=1)
@@ -1130,18 +1181,21 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
                 text=f"⏳ {safe_user_name}, you are on cooldown! Please wait `{minutes}m {seconds}s` before trying again.",
                 parse_mode="Markdown",
             )
-            return
-
-    # 2. Resolve random target
-    target_data = await db.get_random_user(user_id)
-    if not target_data:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            message_thread_id=update.message.message_thread_id,
-            text="There is no one available to steal from!",
-        )
+        elif reason == "no_valid_target":
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                message_thread_id=update.message.message_thread_id,
+                text="❌ Nobody in the group currently has at least 1 CXP available to steal from!",
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                message_thread_id=update.message.message_thread_id,
+                text="❌ Could not perform steal right now. Please try again.",
+            )
         return
 
+    target_data = res["target"]
     target_id = target_data.get("user_id")
     target_name = target_data.get("display_name")
 
@@ -1161,41 +1215,30 @@ async def steal_cxp_cmd(update: Update, context: CallbackContext):
             except Exception:
                 target_name = f"User {target_id}"
 
-    # 3. Perform Steal
-    if random.random() < 0.10:
-        msg = f"🛡️ Shield detected! {user_name} failed to steal!"
-
-        await db.update_user_steal_time(user_id)
-
+    if res.get("shielded"):
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             message_thread_id=update.message.message_thread_id,
-            text=msg,
+            text=f"🛡️ Shield detected! {user_name} failed to steal!",
         )
         return
 
-    STEAL_AMOUNT = random.randint(25, 100)
-
-    target_old_level = calculate_level(target_data.get("cxp", 0))
-    user_old_level = calculate_level(user_data.get("cxp", 0))
-
-    # Deduct from target
-    await db.update_user_cxp(target_id, -STEAL_AMOUNT)
-
-    # Add to sender
-    await db.update_user_cxp(user_id, STEAL_AMOUNT)
-
-    # Update cooldown
-    await db.update_user_steal_time(user_id)
-
+    stolen_amount = res["stolen_amount"]
     safe_user_name = escape_markdown(user_name, version=1)
     safe_target_name = escape_markdown(target_name, version=1)
+    capped_note = " (all the CXP they had left)" if res.get("capped") else ""
+
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         message_thread_id=update.message.message_thread_id,
-        text=f"🎯 **{safe_user_name}** stole `{STEAL_AMOUNT}` CXP from **{safe_target_name}**!",
+        text=f"🎯 **{safe_user_name}** stole `{stolen_amount}` CXP from **{safe_target_name}**{capped_note}!",
         parse_mode="Markdown",
     )
+
+    old_level = calculate_level(res["thief_old_cxp"])
+    new_level = calculate_level(res["thief_new_cxp"])
+    if new_level > old_level:
+        await _announce_level_up(context, user_obj, new_level)
 
 
 async def contest_cmd(update: Update, context: CallbackContext):

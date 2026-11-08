@@ -127,6 +127,25 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 
+                CREATE TABLE IF NOT EXISTS questions (
+                    id SERIAL PRIMARY KEY,
+                    asker_id BIGINT NOT NULL,
+                    asker_name VARCHAR(255),
+                    question_text TEXT NOT NULL,
+                    answer_text VARCHAR(255) NOT NULL,
+                    prize_cxp INTEGER NOT NULL,
+                    guess_cost INTEGER NOT NULL,
+                    collected_cxp INTEGER DEFAULT 0,
+                    guess_count INTEGER DEFAULT 0,
+                    status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                    winner_id BIGINT,
+                    group_message_id BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_questions_status_id ON questions (status, id);
+
                 INSERT INTO bot_config (id, welcome_message, rules_message) 
                 VALUES (1, 'Welcome {mention} to symm.city! 🌆\n\n📜 <b>symm.city Community Rules</b>:\n\n1. Be kind.\n2. Assume good intent.\n3. Be symmetrical.\n4. Be patient.\n5. Be <i>very</i> symmetrical.\n\nWe''re glad to have you here! 💚', '📜 <b>symm.city Community Rules</b>:\n\n1. Be kind.\n2. Assume good intent.\n3. Be symmetrical.\n4. Be patient.\n5. Be <i>very</i> symmetrical.') 
                 ON CONFLICT (id) DO NOTHING;
@@ -250,7 +269,17 @@ class Database:
             return None
         async with self.pool.acquire() as conn:
             return await conn.fetchrow(
-                "SELECT * FROM users WHERE user_id != $1 ORDER BY RANDOM() LIMIT 1",
+                """
+                SELECT u.* FROM users u
+                LEFT JOIN channel_links cl ON u.user_id = cl.channel_id
+                WHERE u.user_id != $1
+                  AND u.user_id > 0
+                  AND u.user_id NOT IN (777000, 136817688, 1087968824)
+                  AND cl.channel_id IS NULL
+                  AND u.cxp >= 1
+                ORDER BY RANDOM()
+                LIMIT 1
+                """,
                 exclude_user_id,
             )
 
@@ -642,6 +671,469 @@ class Database:
             await conn.execute(
                 "DELETE FROM channel_links WHERE channel_id = $1", channel_id
             )
+
+
+    async def _adjust_cxp_in_tx(self, conn, user_id: int, delta_cxp: int, utc_date) -> tuple[int, int]:
+        row = await conn.fetchrow("SELECT cxp FROM users WHERE user_id = $1", user_id)
+        old_cxp = (row["cxp"] or 0) if row else 0
+        if delta_cxp == 0:
+            return old_cxp, old_cxp
+
+        new_cxp = await conn.fetchval(
+            "UPDATE users SET cxp = cxp + $2 WHERE user_id = $1 RETURNING cxp",
+            user_id,
+            delta_cxp,
+        )
+        await conn.execute(
+            """
+            INSERT INTO user_daily_cxp (user_id, date, cxp_gained)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, date) DO UPDATE
+            SET cxp_gained = user_daily_cxp.cxp_gained + $3
+            """,
+            user_id,
+            utc_date,
+            delta_cxp,
+        )
+        return old_cxp, new_cxp
+
+    async def place_bet_and_settle(self, user_id: int, bet: int, payout: int) -> dict:
+        if not self.pool:
+            return {"ok": False, "reason": "db_unavailable"}
+
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                    user_id,
+                )
+                row = await conn.fetchrow(
+                    "SELECT cxp FROM users WHERE user_id = $1 FOR UPDATE", user_id
+                )
+                old_cxp = (row["cxp"] or 0) if row else 0
+                if old_cxp < bet:
+                    return {
+                        "ok": False,
+                        "reason": "insufficient_cxp",
+                        "current_cxp": old_cxp,
+                    }
+
+                net_delta = payout - bet
+                _, new_cxp = await self._adjust_cxp_in_tx(
+                    conn, user_id, net_delta, utc_date
+                )
+                return {
+                    "ok": True,
+                    "old_cxp": old_cxp,
+                    "new_cxp": new_cxp,
+                    "net_delta": net_delta,
+                }
+
+    async def create_question(
+        self,
+        asker_id: int,
+        asker_name: str,
+        question_text: str,
+        answer_text: str,
+        prize_cxp: int,
+        guess_cost: int,
+    ) -> dict:
+        if not self.pool:
+            return {"ok": False, "reason": "db_unavailable"}
+
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(777001)")
+                await conn.execute(
+                    "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                    asker_id,
+                )
+                row = await conn.fetchrow(
+                    "SELECT cxp FROM users WHERE user_id = $1 FOR UPDATE", asker_id
+                )
+                old_cxp = (row["cxp"] or 0) if row else 0
+                if old_cxp < prize_cxp:
+                    return {
+                        "ok": False,
+                        "reason": "insufficient_cxp",
+                        "current_cxp": old_cxp,
+                    }
+
+                _, new_cxp = await self._adjust_cxp_in_tx(
+                    conn, asker_id, -prize_cxp, utc_date
+                )
+
+                active_id = await conn.fetchval(
+                    "SELECT id FROM questions WHERE status = 'active' LIMIT 1"
+                )
+                if active_id is None:
+                    status = "active"
+                    queue_position = 0
+                else:
+                    status = "queued"
+                    queued_count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM questions WHERE status = 'queued'"
+                    )
+                    queue_position = (queued_count or 0) + 1
+
+                q_row = await conn.fetchrow(
+                    """
+                    INSERT INTO questions (
+                        asker_id, asker_name, question_text, answer_text, prize_cxp, guess_cost, status
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    RETURNING *
+                    """,
+                    asker_id,
+                    (asker_name or "")[:255],
+                    question_text,
+                    answer_text[:255],
+                    prize_cxp,
+                    guess_cost,
+                    status,
+                )
+                return {
+                    "ok": True,
+                    "question": dict(q_row),
+                    "became_active": status == "active",
+                    "queue_position": queue_position,
+                    "remaining_cxp": new_cxp,
+                }
+
+    async def set_question_message_id(self, question_id: int, group_message_id: int):
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE questions SET group_message_id = $2 WHERE id = $1",
+                question_id,
+                group_message_id,
+            )
+
+    async def get_active_question(self):
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM questions WHERE status = 'active' ORDER BY id ASC LIMIT 1"
+            )
+            return dict(row) if row else None
+
+    async def get_queued_questions_count(self) -> int:
+        if not self.pool:
+            return 0
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM questions WHERE status = 'queued'"
+            )
+            return count or 0
+
+    async def submit_question_answer(
+        self, guesser_id: int, normalized_guess: str
+    ) -> dict:
+        if not self.pool:
+            return {"ok": False, "reason": "db_unavailable"}
+
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(777001)")
+                q = await conn.fetchrow(
+                    "SELECT * FROM questions WHERE status = 'active' ORDER BY id ASC LIMIT 1 FOR UPDATE"
+                )
+                if not q:
+                    return {"ok": False, "reason": "no_active_question"}
+
+                q_dict = dict(q)
+                asker_id = q_dict["asker_id"]
+                if asker_id == guesser_id:
+                    return {
+                        "ok": False,
+                        "reason": "self_answer",
+                        "question": q_dict,
+                    }
+
+                for uid in sorted({guesser_id, asker_id}):
+                    await conn.execute(
+                        "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                        uid,
+                    )
+                locked_balances = {}
+                for uid in sorted({guesser_id, asker_id}):
+                    urow = await conn.fetchrow(
+                        "SELECT cxp FROM users WHERE user_id = $1 FOR UPDATE", uid
+                    )
+                    locked_balances[uid] = (urow["cxp"] or 0) if urow else 0
+
+                guesser_old_cxp = locked_balances[guesser_id]
+                guess_cost = q_dict["guess_cost"]
+                if guess_cost > 0 and guesser_old_cxp < guess_cost:
+                    return {
+                        "ok": False,
+                        "reason": "insufficient_cxp",
+                        "current_cxp": guesser_old_cxp,
+                        "guess_cost": guess_cost,
+                        "question": q_dict,
+                    }
+
+                new_collected = (q_dict["collected_cxp"] or 0) + guess_cost
+                new_guess_count = (q_dict["guess_count"] or 0) + 1
+                is_correct = normalized_guess == q_dict["answer_text"]
+
+                if not is_correct:
+                    _, guesser_new_cxp = await self._adjust_cxp_in_tx(
+                        conn, guesser_id, -guess_cost, utc_date
+                    )
+                    await conn.execute(
+                        "UPDATE questions SET collected_cxp = $2, guess_count = $3 WHERE id = $1",
+                        q_dict["id"],
+                        new_collected,
+                        new_guess_count,
+                    )
+                    return {
+                        "ok": True,
+                        "correct": False,
+                        "guess_cost": guess_cost,
+                        "guesser_old_cxp": guesser_old_cxp,
+                        "guesser_new_cxp": guesser_new_cxp,
+                        "collected_cxp": new_collected,
+                        "guess_count": new_guess_count,
+                        "question": q_dict,
+                    }
+
+                prize_cxp = q_dict["prize_cxp"]
+                _, guesser_new_cxp = await self._adjust_cxp_in_tx(
+                    conn, guesser_id, prize_cxp - guess_cost, utc_date
+                )
+                asker_old_cxp, asker_new_cxp = await self._adjust_cxp_in_tx(
+                    conn, asker_id, new_collected, utc_date
+                )
+                await conn.execute(
+                    """
+                    UPDATE questions
+                    SET status = 'answered',
+                        collected_cxp = $2,
+                        guess_count = $3,
+                        winner_id = $4,
+                        closed_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    """,
+                    q_dict["id"],
+                    new_collected,
+                    new_guess_count,
+                    guesser_id,
+                )
+
+                next_row = await conn.fetchrow(
+                    "SELECT * FROM questions WHERE status = 'queued' ORDER BY id ASC LIMIT 1 FOR UPDATE"
+                )
+                next_q = None
+                if next_row:
+                    updated_next = await conn.fetchrow(
+                        "UPDATE questions SET status = 'active' WHERE id = $1 RETURNING *",
+                        next_row["id"],
+                    )
+                    next_q = dict(updated_next)
+
+                return {
+                    "ok": True,
+                    "correct": True,
+                    "guess_cost": guess_cost,
+                    "prize_cxp": prize_cxp,
+                    "collected_cxp": new_collected,
+                    "guess_count": new_guess_count,
+                    "guesser_old_cxp": guesser_old_cxp,
+                    "guesser_new_cxp": guesser_new_cxp,
+                    "asker_old_cxp": asker_old_cxp,
+                    "asker_new_cxp": asker_new_cxp,
+                    "question": q_dict,
+                    "next_question": next_q,
+                }
+
+    async def cancel_active_question(self, actor_id: int, is_admin: bool) -> dict:
+        if not self.pool:
+            return {"ok": False, "reason": "db_unavailable"}
+
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(777001)")
+                q = await conn.fetchrow(
+                    "SELECT * FROM questions WHERE status = 'active' ORDER BY id ASC LIMIT 1 FOR UPDATE"
+                )
+                if not q:
+                    return {"ok": False, "reason": "no_active_question"}
+
+                q_dict = dict(q)
+                asker_id = q_dict["asker_id"]
+                if not is_admin and asker_id != actor_id:
+                    return {
+                        "ok": False,
+                        "reason": "forbidden",
+                        "question": q_dict,
+                    }
+
+                await conn.execute(
+                    "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                    asker_id,
+                )
+                await conn.fetchrow(
+                    "SELECT cxp FROM users WHERE user_id = $1 FOR UPDATE", asker_id
+                )
+
+                prize_cxp = q_dict["prize_cxp"]
+                collected_cxp = q_dict["collected_cxp"] or 0
+                total_return = prize_cxp + collected_cxp
+                asker_old_cxp, asker_new_cxp = await self._adjust_cxp_in_tx(
+                    conn, asker_id, total_return, utc_date
+                )
+
+                await conn.execute(
+                    "UPDATE questions SET status = 'cancelled', closed_at = CURRENT_TIMESTAMP WHERE id = $1",
+                    q_dict["id"],
+                )
+
+                next_row = await conn.fetchrow(
+                    "SELECT * FROM questions WHERE status = 'queued' ORDER BY id ASC LIMIT 1 FOR UPDATE"
+                )
+                next_q = None
+                if next_row:
+                    updated_next = await conn.fetchrow(
+                        "UPDATE questions SET status = 'active' WHERE id = $1 RETURNING *",
+                        next_row["id"],
+                    )
+                    next_q = dict(updated_next)
+
+                return {
+                    "ok": True,
+                    "cancelled_question": q_dict,
+                    "prize_returned": prize_cxp,
+                    "collected_paid": collected_cxp,
+                    "guess_count": q_dict["guess_count"] or 0,
+                    "asker_old_cxp": asker_old_cxp,
+                    "asker_new_cxp": asker_new_cxp,
+                    "next_question": next_q,
+                }
+
+
+    async def attempt_steal(
+        self, thief_id: int, desired_amount: int, shielded: bool
+    ) -> dict:
+        if not self.pool:
+            return {"ok": False, "reason": "db_unavailable"}
+
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                    thief_id,
+                )
+
+                elapsed = await conn.fetchval(
+                    """
+                    SELECT EXTRACT(EPOCH FROM (LOCALTIMESTAMP - last_steal_time))
+                    FROM users
+                    WHERE user_id = $1
+                    """,
+                    thief_id,
+                )
+                if elapsed is not None and elapsed < 3600:
+                    return {
+                        "ok": False,
+                        "reason": "cooldown",
+                        "remaining_seconds": max(1, int(3600 - elapsed)),
+                    }
+
+                locked_target = None
+                thief_old_cxp = 0
+                for _ in range(3):
+                    candidate_id = await conn.fetchval(
+                        """
+                        SELECT u.user_id
+                        FROM users u
+                        LEFT JOIN channel_links cl ON u.user_id = cl.channel_id
+                        WHERE u.user_id != $1
+                          AND u.user_id > 0
+                          AND u.user_id NOT IN (777000, 136817688, 1087968824)
+                          AND cl.channel_id IS NULL
+                          AND u.cxp >= 1
+                        ORDER BY RANDOM()
+                        LIMIT 1
+                        """,
+                        thief_id,
+                    )
+                    if candidate_id is None:
+                        return {"ok": False, "reason": "no_valid_target"}
+
+                    rows_by_id = {}
+                    for uid in sorted({thief_id, candidate_id}):
+                        rows_by_id[uid] = await conn.fetchrow(
+                            "SELECT * FROM users WHERE user_id = $1 FOR UPDATE", uid
+                        )
+
+                    thief_row = rows_by_id[thief_id]
+                    if thief_row and thief_row["last_steal_time"] is not None:
+                        elapsed_locked = await conn.fetchval(
+                            "SELECT EXTRACT(EPOCH FROM (LOCALTIMESTAMP - $1::timestamp))",
+                            thief_row["last_steal_time"],
+                        )
+                        if elapsed_locked is not None and elapsed_locked < 3600:
+                            return {
+                                "ok": False,
+                                "reason": "cooldown",
+                                "remaining_seconds": max(1, int(3600 - elapsed_locked)),
+                            }
+
+                    cand_row = rows_by_id[candidate_id]
+                    if cand_row and (cand_row["cxp"] or 0) >= 1:
+                        locked_target = dict(cand_row)
+                        thief_old_cxp = (thief_row["cxp"] or 0) if thief_row else 0
+                        break
+
+                if not locked_target:
+                    return {"ok": False, "reason": "no_valid_target"}
+
+                if shielded:
+                    await conn.execute(
+                        "UPDATE users SET last_steal_time = LOCALTIMESTAMP WHERE user_id = $1",
+                        thief_id,
+                    )
+                    return {
+                        "ok": True,
+                        "shielded": True,
+                        "target": locked_target,
+                    }
+
+                target_id = locked_target["user_id"]
+                target_available = locked_target["cxp"] or 0
+                actual_stolen = min(desired_amount, target_available)
+
+                target_old_cxp, target_new_cxp = await self._adjust_cxp_in_tx(
+                    conn, target_id, -actual_stolen, utc_date
+                )
+                _, thief_new_cxp = await self._adjust_cxp_in_tx(
+                    conn, thief_id, actual_stolen, utc_date
+                )
+                await conn.execute(
+                    "UPDATE users SET last_steal_time = LOCALTIMESTAMP WHERE user_id = $1",
+                    thief_id,
+                )
+
+                return {
+                    "ok": True,
+                    "shielded": False,
+                    "stolen_amount": actual_stolen,
+                    "desired_amount": desired_amount,
+                    "capped": actual_stolen < desired_amount,
+                    "target": locked_target,
+                    "target_old_cxp": target_old_cxp,
+                    "target_new_cxp": target_new_cxp,
+                    "thief_old_cxp": thief_old_cxp,
+                    "thief_new_cxp": thief_new_cxp,
+                }
 
 
 db = Database()

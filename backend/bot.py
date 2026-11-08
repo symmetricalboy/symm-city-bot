@@ -67,6 +67,14 @@ from handlers.ai_chat import ask_cmd
 from handlers.time import time_cmd, settime_cmd
 from handlers.ping import ping_cmd
 from handlers.channel_link import set_channel_cmd
+from handlers.games import (
+    gamble_cmd,
+    get_question_conversation_handler,
+    handle_stale_question_callback,
+    question_group_cmd,
+    answer_cmd,
+    cancel_question_cmd,
+)
 
 # Suppress Python 3.14 SyntaxWarning from anyio dependency
 warnings.filterwarnings(
@@ -116,12 +124,22 @@ async def auth_middleware(update: Update, context) -> None:
         if not is_allowed:
             # Check if attempting to run an allowed user-facing command
             message_text = update.message.text.lower() if update.message and update.message.text else ""
-            if message_text.startswith("/start setchannel") or message_text.startswith("/setchannel"):
+            callback_data = update.callback_query.data if update.callback_query and update.callback_query.data else ""
+            in_question_flow = bool(context.user_data and context.user_data.get("in_question_flow"))
+            if (
+                message_text.startswith("/start setchannel")
+                or message_text.startswith("/setchannel")
+                or message_text.startswith("/start question")
+                or message_text.startswith("/question")
+                or message_text.startswith("/cancel")
+                or in_question_flow
+                or callback_data.startswith("qconfirm_")
+            ):
                 # We allow users to use the bot in DM for channel linking
                 pass
             else:
                 if update.message:
-                    await update.message.reply_text("This bot does not provide any user facing functionality via direct message except for linking channels.")
+                    await update.message.reply_text("This bot does not provide any user facing functionality via direct message except for linking channels (/setchannel) and submitting trivia questions (/question).")
                 raise ApplicationHandlerStop()
 
     if chat_type in ("group", "supergroup"):
@@ -193,6 +211,8 @@ def main() -> None:
     # Add handlers
     application.add_handler(TypeHandler(Update, auth_middleware), group=-1)
 
+    application.add_handler(get_question_conversation_handler())
+    application.add_handler(CallbackQueryHandler(handle_stale_question_callback, pattern="^qconfirm_"))
     application.add_handler(get_config_conversation_handler())
     application.add_handler(get_channel_admin_conversation())
     application.add_handler(CallbackQueryHandler(handle_post_action, pattern="^draft_"))
@@ -225,6 +245,10 @@ def main() -> None:
     application.add_handler(CommandHandler("checkid", get_id_cmd))
     application.add_handler(CommandHandler("setadmin", set_admin_cmd))
     application.add_handler(CommandHandler("steal", steal_cxp_cmd))
+    application.add_handler(CommandHandler("gamble", gamble_cmd))
+    application.add_handler(CommandHandler("question", question_group_cmd))
+    application.add_handler(CommandHandler("answer", answer_cmd))
+    application.add_handler(CommandHandler("cancel", cancel_question_cmd))
     application.add_handler(CommandHandler("setcontest", setcontest_cmd))
     application.add_handler(CommandHandler("contest", contest_cmd))
     application.add_handler(CommandHandler("syncperms", syncperms_cmd))

@@ -24,7 +24,7 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
      * *Lvl 50-59:* Very Symmetrical | *Lvl 60+:* Pure Symmetry
 - **Leaderboards**: View the top active members globally (`/leaderboard`) or filter by timeframe (`/leaderboard day`, `week`, `month`).
 - **Contests**: Admins can use `/setcontest` to define a specific date range for special events, trackable via `/contest`.
-- **Mini-Games**: Users can use `/steal` to attempt to steal 25-100 CXP from a random user (1-hour cooldown).
+- **Mini-Games & Trivia**: Users can use `/steal` to attempt to steal up to 25-100 CXP from a random user with available CXP (1-hour cooldown), `/gamble <amount>` to spin the CXP slot machine (with payouts and odds scaling with bet size), or DM `/question` to host CXP trivia questions in the group (`/answer`, `/cancel`).
 
 ### 🤖 Grounded AI Assistant (`/ask`)
 - **Grounded in Bluesky History**: Grounded in symmetricalboy's full Bluesky post archive using BM25 semantic retrieval, plus core knowledge of symm's projects (Symmetris, music, software, tech).
