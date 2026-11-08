@@ -41,25 +41,26 @@ ANSWER_ALLOWED_RE = re.compile(r"^[a-zA-Z0-9 ]+$")
 
 # Slot machine symbols: (emoji, 3-of-a-kind multiplier, label)
 SLOT_SYMBOLS = [
-    ("🍒", 2.0, "Cherries"),
-    ("🍋", 2.5, "Lemons"),
-    ("🍊", 3.0, "Oranges"),
-    ("🍇", 4.0, "Grapes"),
-    ("🔔", 6.0, "Bells"),
-    ("🍀", 10.0, "Clovers"),
-    ("💎", 16.0, "Diamonds"),
-    ("7️⃣", 30.0, "Jackpot Sevens"),
+    ("🍒", 1.5, "Cherries"),
+    ("🍋", 2.0, "Lemons"),
+    ("🍊", 2.5, "Oranges"),
+    ("🍇", 3.5, "Grapes"),
+    ("🔔", 5.0, "Bells"),
+    ("🍀", 8.0, "Clovers"),
+    ("💎", 14.0, "Diamonds"),
+    ("7️⃣", 25.0, "Jackpot Sevens"),
 ]
 
-# Center-row adjacent 2-of-a-kind multipliers (when center row is not already 3-of-a-kind)
-CENTER_PAIR_MULTIPLIERS = {
-    0: 1.5,  # 🍒🍒
-    6: 2.0,  # 💎💎
-    7: 3.0,  # 7️⃣7️⃣
+# Adjacent 2-of-a-kind multipliers on ANY of the 5 paylines (3 rows + 2 diagonals)
+LINE_PAIR_MULTIPLIERS = {
+    0: 1.15,  # 🍒🍒
+    6: 1.5,   # 💎💎
+    7: 2.0,   # 7️⃣7️⃣
 }
 
-SLOT_BASE_WEIGHTS = [25.0, 21.0, 18.0, 13.5, 9.5, 6.2, 4.3, 2.5]
-SLOT_HIGH_WEIGHTS = [22.0, 19.5, 17.0, 14.5, 11.0, 7.2, 5.5, 3.3]
+SLOT_BASE_WEIGHTS = [21.0, 21.5, 19.5, 15.5, 10.5, 6.2, 3.6, 2.2]
+SLOT_HIGH_WEIGHTS = [20.0, 20.0, 18.0, 15.5, 11.5, 7.2, 4.6, 3.2]
+SLOT_ALIGN_WEIGHTS = [34.0, 27.0, 19.0, 11.0, 5.5, 2.2, 0.9, 0.4]
 
 
 def _get_bot_owner_id() -> int | None:
@@ -73,7 +74,7 @@ def _get_bot_owner_id() -> int | None:
 
 
 def _normalize_answer(raw: str) -> str | None:
-    """Validate a-z 0-9 & spaces only, returning lowercase single-spaced string or None."""
+    """Validate a single answer (a-z 0-9 & spaces only), returning lowercase single-spaced string or None."""
     if not raw:
         return None
     stripped = raw.strip()
@@ -83,6 +84,42 @@ def _normalize_answer(raw: str) -> str | None:
         return None
     normalized = " ".join(stripped.lower().split())
     return normalized if normalized else None
+
+
+def _parse_accepted_answers(raw: str) -> list[str] | None:
+    """
+    Parse one or more comma-separated accepted answers for /question.
+    Each answer must be 1-200 chars of only a-z, 0-9, and spaces (case-insensitive).
+    Returns a deduplicated list of normalized answers (preserving order), or None if invalid.
+    """
+    if not raw or not raw.strip():
+        return None
+    raw_parts = raw.split(",")
+    if len(raw_parts) > 1 and not raw_parts[-1].strip():
+        raw_parts = raw_parts[:-1]
+    if not raw_parts or len(raw_parts) > 25:
+        return None
+
+    seen: set[str] = set()
+    normalized_list: list[str] = []
+    for part in raw_parts:
+        norm = _normalize_answer(part)
+        if not norm:
+            return None
+        if norm not in seen:
+            seen.add(norm)
+            normalized_list.append(norm)
+
+    if not normalized_list or len(", ".join(normalized_list)) > 1000:
+        return None
+    return normalized_list
+
+
+def _format_answers_html(answer_text: str) -> tuple[list[str], str]:
+    """Split stored comma-separated answer_text into (list_of_answers, html_code_joined_str)."""
+    answers = [a.strip() for a in (answer_text or "").split(",") if a.strip()]
+    formatted = ", ".join(f"<code>{html.escape(a)}</code>" for a in answers)
+    return answers, formatted
 
 
 def _parse_signed_int_amount(raw: str) -> int | None:
@@ -196,41 +233,44 @@ async def _maybe_announce_level_up(
 
 def spin_slot_machine(bet: int) -> dict:
     """
-    Spin a 3-reel x 3-row slot machine with 5 paylines (3 horizontal rows + 2 diagonals).
-    Higher bets smoothly improve both symbol weights and reel-alignment luck.
+    Spin a 3-reel x 3-row slot machine with 5 equal paylines (Top, Middle, Bottom rows + 2 Diagonals).
+    All winning paylines stack for multiple payouts, and higher bets unlock better symbol & alignment odds.
     """
-    luck = min(1.0, math.log(max(1, bet)) / math.log(10000))
+    luck = min(1.0, math.log10(max(1, bet)) / 4.0)
     weights = [
         base + (high - base) * luck
         for base, high in zip(SLOT_BASE_WEIGHTS, SLOT_HIGH_WEIGHTS)
     ]
 
-    # Spin 3 independent reels; each reel displays 3 distinct symbols (no confusing vertical triples)
+    # Spin 3 reels x 3 rows; allow up to 2 of the same symbol per reel (so multi-line row+diagonal
+    # 3-of-a-kinds can hit together) while disallowing confusing vertical 3-of-a-kinds in one column.
     reels: list[list[int]] = []
     for _ in range(3):
-        pool = list(range(len(SLOT_SYMBOLS)))
-        w = list(weights)
-        col = []
-        for _ in range(3):
-            idx = random.choices(range(len(pool)), weights=w, k=1)[0]
-            col.append(pool.pop(idx))
-            w.pop(idx)
-        reels.append(col)
+        while True:
+            col = random.choices(range(len(SLOT_SYMBOLS)), weights=weights, k=3)
+            if not (col[0] == col[1] == col[2]):
+                reels.append(col)
+                break
 
-    # Bet-correlated reel alignment luck boost
-    nudge_prob = 0.05 + 0.11 * luck
-    if random.random() < nudge_prob:
-        target_row = random.choice([0, 1, 2])
-        sym = reels[0][target_row]
-        for r in (1, 2):
-            if sym in reels[r]:
-                cur_pos = reels[r].index(sym)
-                reels[r][target_row], reels[r][cur_pos] = (
-                    reels[r][cur_pos],
-                    reels[r][target_row],
-                )
-            elif random.random() < (0.45 + 0.20 * luck):
-                reels[r][target_row] = sym
+    # Bet-correlated single/multi-line alignment luck across any of the 5 paylines
+    line_coords = [
+        [(0, 0), (1, 0), (2, 0)],  # Top Row
+        [(0, 1), (1, 1), (2, 1)],  # Middle Row
+        [(0, 2), (1, 2), (2, 2)],  # Bottom Row
+        [(0, 0), (1, 1), (2, 2)],  # Diagonal ↘
+        [(0, 2), (1, 1), (2, 0)],  # Diagonal ↗
+    ]
+    if random.random() < (0.05 + 0.11 * luck):
+        num_lines = 2 if random.random() < (0.18 + 0.24 * luck) else 1
+        sym = random.choices(range(len(SLOT_SYMBOLS)), weights=SLOT_ALIGN_WEIGHTS, k=1)[0]
+        for coords in random.sample(line_coords, k=num_lines):
+            saved = [reels[c][r] for c, r in coords]
+            for c, r in coords:
+                reels[c][r] = sym
+            # Revert if placing sym accidentally formed a vertical 3-in-a-column
+            if any(reels[c][0] == reels[c][1] == reels[c][2] for c, _ in coords):
+                for (c, r), old in zip(coords, saved):
+                    reels[c][r] = old
 
     # Convert reels[col][row] -> grid[row][col]
     grid_idx = [[reels[col][row] for col in range(3)] for row in range(3)]
@@ -246,7 +286,6 @@ def spin_slot_machine(bet: int) -> dict:
 
     winning_lines = []
     total_multiplier = 0.0
-    center_three_hit = False
 
     for line_name, line_syms in paylines:
         if line_syms[0] == line_syms[1] == line_syms[2]:
@@ -254,21 +293,17 @@ def spin_slot_machine(bet: int) -> dict:
             emoji, mult, _ = SLOT_SYMBOLS[sym_idx]
             total_multiplier += mult
             winning_lines.append((line_name, f"{emoji} {emoji} {emoji}", mult))
-            if line_name == "Middle Row":
-                center_three_hit = True
-
-    if not center_three_hit:
-        center = paylines[1][1]
-        pair_sym = (
-            center[0]
-            if center[0] == center[1]
-            else (center[1] if center[1] == center[2] else None)
-        )
-        if pair_sym is not None and pair_sym in CENTER_PAIR_MULTIPLIERS:
-            emoji = SLOT_SYMBOLS[pair_sym][0]
-            pair_mult = CENTER_PAIR_MULTIPLIERS[pair_sym]
-            total_multiplier += pair_mult
-            winning_lines.append(("Center Pair", f"{emoji} {emoji}", pair_mult))
+        else:
+            pair_sym = (
+                line_syms[0]
+                if line_syms[0] == line_syms[1]
+                else (line_syms[1] if line_syms[1] == line_syms[2] else None)
+            )
+            if pair_sym is not None and pair_sym in LINE_PAIR_MULTIPLIERS:
+                emoji = SLOT_SYMBOLS[pair_sym][0]
+                pair_mult = LINE_PAIR_MULTIPLIERS[pair_sym]
+                total_multiplier += pair_mult
+                winning_lines.append((f"{line_name} Pair", f"{emoji} {emoji}", pair_mult))
 
     if total_multiplier > 0:
         payout = max(bet + 1, int(math.ceil(bet * total_multiplier)))
@@ -342,11 +377,12 @@ async def gamble_cmd(update: Update, context: CallbackContext):
         help_text = (
             "🎰 <b>symm.city Slot Machine</b>\n\n"
             "<b>Usage:</b> <code>/gamble &lt;amount&gt;</code> (e.g. <code>/gamble 50</code>)\n"
-            "<i>Higher bets unlock better symbol odds &amp; reel alignment luck!</i>\n\n"
-            "<b>3-in-a-Row Paytable (Rows &amp; Diagonals):</b>\n"
-            "🍒 <code>2x</code>  •  🍋 <code>2.5x</code>  •  🍊 <code>3x</code>  •  🍇 <code>4x</code>\n"
-            "🔔 <code>6x</code>  •  🍀 <code>10x</code>  •  💎 <code>16x</code>  •  7️⃣ <code>30x</code>\n"
-            "<i>Center-line pairs of</i> 🍒 <i>(1.5x),</i> 💎 <i>(2x), or</i> 7️⃣ <i>(3x) also win!</i>"
+            "<i>All 3 horizontal rows &amp; both diagonals pay out — and multiple winning lines stack! "
+            "Higher bets unlock better symbol odds &amp; multi-line luck!</i>\n\n"
+            "<b>3-in-a-Row Paytable (Any Row or Diagonal):</b>\n"
+            "🍒 <code>1.5x</code>  •  🍋 <code>2x</code>  •  🍊 <code>2.5x</code>  •  🍇 <code>3.5x</code>\n"
+            "🔔 <code>5x</code>  •  🍀 <code>8x</code>  •  💎 <code>14x</code>  •  7️⃣ <code>25x</code>\n"
+            "<i>Adjacent pairs of</i> 🍒 <i>(1.15x),</i> 💎 <i>(1.5x), or</i> 7️⃣ <i>(2x) on any row or diagonal also pay out!</i>"
         )
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -441,9 +477,9 @@ async def gamble_cmd(update: Update, context: CallbackContext):
     new_cxp = settlement["new_cxp"]
 
     grid_display = (
-        f"⬛ {grid[0][0]} │ {grid[0][1]} │ {grid[0][2]} ⬛\n"
-        f"▶️ {grid[1][0]} │ {grid[1][1]} │ {grid[1][2]} ◀️\n"
-        f"⬛ {grid[2][0]} │ {grid[2][1]} │ {grid[2][2]} ⬛"
+        f"{grid[0][0]} │ {grid[0][1]} │ {grid[0][2]}\n"
+        f"{grid[1][0]} │ {grid[1][1]} │ {grid[1][2]}\n"
+        f"{grid[2][0]} │ {grid[2][1]} │ {grid[2][2]}"
     )
 
     if payout > 0:
@@ -451,18 +487,27 @@ async def gamble_cmd(update: Update, context: CallbackContext):
             f"✨ <b>{line_name}:</b> {icons} (<code>{_format_multiplier(mult)}</code>)"
             for line_name, icons, mult in winning_lines
         )
-        header = (
-            "🚨 <b>JACKPOT!! SYMM SLOTS</b> 🚨"
-            if spin["total_multiplier"] >= 16.0
-            else "🎰 <b>SYMM SLOTS — WINNER!</b> 🎰"
+        total_mult_str = _format_multiplier(round(spin["total_multiplier"], 4))
+        if spin["total_multiplier"] >= 14.0:
+            header = "🚨 <b>JACKPOT!! SYMM SLOTS</b> 🚨"
+        elif len(winning_lines) >= 2:
+            header = f"🎰 <b>SYMM SLOTS — {len(winning_lines)}x MULTI-LINE WIN!</b> 🎰"
+        else:
+            header = "🎰 <b>SYMM SLOTS — WINNER!</b> 🎰"
+
+        multi_note = (
+            f"🔥 <b>Combined Multiplier:</b> <code>{total_mult_str}</code> ({len(winning_lines)} winning lines!)\n"
+            if len(winning_lines) >= 2
+            else ""
         )
         msg = (
             f"{header}\n"
             f"👤 <b>{safe_name}</b> bet <code>{bet:,} CXP</code>\n"
-            f"━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━\n"
             f"{grid_display}\n"
-            f"━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━\n"
             f"{lines_summary}\n\n"
+            f"{multi_note}"
             f"🏆 <b>Payout:</b> <code>{payout:,} CXP</code> (Net: <code>+{net_delta:,} CXP</code>)\n"
             f"💰 <b>Balance:</b> <code>{new_cxp:,} CXP</code>"
         )
@@ -470,9 +515,9 @@ async def gamble_cmd(update: Update, context: CallbackContext):
         msg = (
             f"🎰 <b>SYMM SLOTS</b> 🎰\n"
             f"👤 <b>{safe_name}</b> bet <code>{bet:,} CXP</code>\n"
-            f"━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━\n"
             f"{grid_display}\n"
-            f"━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━\n"
             f"💸 <b>No match!</b> Lost <code>{bet:,} CXP</code>.\n"
             f"💰 <b>Balance:</b> <code>{new_cxp:,} CXP</code>"
         )
@@ -743,9 +788,10 @@ async def receive_question_text(update: Update, context: CallbackContext) -> int
 
     await update.message.reply_text(
         "✅ <b>Question saved! (Step 2/4)</b>\n\n"
-        "Now send the <b>correct answer</b> for your question.\n"
+        "Now send the <b>correct answer(s)</b> for your question.\n"
         "• Matching is <b>case-insensitive</b>\n"
-        "• Only letters (<code>a-z</code>), numbers (<code>0-9</code>), and spaces are allowed\n\n"
+        "• Each answer may only contain letters (<code>a-z</code>), numbers (<code>0-9</code>), and spaces\n"
+        "• You can provide <b>multiple accepted answers</b> separated by commas (e.g. <code>united states, usa, us</code>)\n\n"
         "<i>(Type /cancel to abort)</i>",
         parse_mode=ParseMode.HTML,
     )
@@ -754,18 +800,20 @@ async def receive_question_text(update: Update, context: CallbackContext) -> int
 
 async def receive_answer_text(update: Update, context: CallbackContext) -> int:
     raw = update.message.text or ""
-    normalized = _normalize_answer(raw)
-    if not normalized:
+    accepted_answers = _parse_accepted_answers(raw)
+    if not accepted_answers:
         await update.message.reply_text(
-            "⚠️ <b>Invalid answer!</b>\n"
-            "The answer must be 1–200 characters and may <b>only</b> contain letters (<code>a-z</code>), "
-            "numbers (<code>0-9</code>), and spaces (no punctuation or symbols).\n\n"
-            "Please enter a valid answer (or /cancel to abort):",
+            "⚠️ <b>Invalid answer(s)!</b>\n"
+            "Each answer must be 1–200 characters and may <b>only</b> contain letters (<code>a-z</code>), "
+            "numbers (<code>0-9</code>), and spaces — separated by commas if providing multiple accepted answers "
+            "(e.g. <code>apollo 11, apollo xi</code>).\n\n"
+            "Please enter valid answer(s) (or /cancel to abort):",
             parse_mode=ParseMode.HTML,
         )
         return Q_STATE_ANSWER
 
-    context.user_data["question_draft"]["answer_text"] = normalized
+    joined_answers = ", ".join(accepted_answers)
+    context.user_data["question_draft"]["answer_text"] = joined_answers
 
     user_data = await db.get_user(update.effective_user.id)
     current_cxp = (user_data.get("cxp") or 0) if user_data else 0
@@ -778,8 +826,15 @@ async def receive_answer_text(update: Update, context: CallbackContext) -> int:
         )
         return ConversationHandler.END
 
+    _, formatted_answers = _format_answers_html(joined_answers)
+    ans_label = (
+        f"Accepted answers saved ({len(accepted_answers)}):"
+        if len(accepted_answers) > 1
+        else "Answer saved:"
+    )
+
     await update.message.reply_text(
-        f"✅ <b>Answer saved:</b> <code>{html.escape(normalized)}</code> <b>(Step 3/4)</b>\n\n"
+        f"✅ <b>{ans_label}</b> {formatted_answers} <b>(Step 3/4)</b>\n\n"
         f"How much <b>CXP</b> are you offering as the <b>prize</b>?\n"
         f"💰 <b>Available Balance:</b> <code>{current_cxp:,} CXP</code>\n\n"
         f"<i>(Enter a whole number ≥ 1, or /cancel to abort)</i>",
@@ -869,10 +924,16 @@ async def receive_guess_cost(update: Update, context: CallbackContext) -> int:
     )
 
     cost_display = f"{cost:,} CXP" if cost > 0 else "FREE (0 CXP)"
+    ans_list, formatted_answers = _format_answers_html(draft["answer_text"])
+    ans_heading = (
+        f"Accepted Answers ({len(ans_list)})"
+        if len(ans_list) > 1
+        else "Correct Answer"
+    )
     summary = (
         f"📋 <b>Confirm Your Trivia Question</b>\n\n"
         f"❓ <b>Question:</b>\n{html.escape(draft['question_text'])}\n\n"
-        f"🔑 <b>Correct Answer:</b> <code>{html.escape(draft['answer_text'])}</code> <i>(case-insensitive)</i>\n"
+        f"🔑 <b>{ans_heading}:</b> {formatted_answers} <i>(case-insensitive)</i>\n"
         f"🏆 <b>Prize Offered:</b> <code>{draft['prize_cxp']:,} CXP</code> <i>(escrowed from your CXP now)</i>\n"
         f"🎟️ <b>Price to Guess:</b> <code>{cost_display}</code> <i>(paid to you!)</i>\n\n"
         f"Ready to submit this question?"
@@ -1288,10 +1349,18 @@ async def answer_cmd(update: Update, context: CallbackContext):
     collected = res["collected_cxp"]
     guesses = res["guess_count"]
     cost_paid_note = f" (paid <code>{cost:,} CXP</code> to guess)" if cost > 0 else ""
+    matched_answer = res.get("matched_answer") or normalized_guess
+    all_answers, formatted_all_answers = _format_answers_html(question["answer_text"])
+    also_accepted_line = (
+        f"🔑 <b>All Accepted Answers:</b> {formatted_all_answers}\n"
+        if len(all_answers) > 1
+        else ""
+    )
 
     win_msg = (
         f"🎉 <b>CORRECT ANSWER!</b> 🎉\n\n"
-        f"🏆 <b>{safe_guesser}</b> answered correctly: <code>{html.escape(question['answer_text'])}</code>!\n"
+        f"🏆 <b>{safe_guesser}</b> answered correctly: <code>{html.escape(matched_answer)}</code>!\n"
+        f"{also_accepted_line}"
         f"💰 <b>Prize Won:</b> <code>+{prize:,} CXP</code>{cost_paid_note}\n"
         f"🏦 <b>{safe_asker}</b> collected <code>{collected:,} CXP</code> across <code>{guesses}</code> guess(es)!"
     )
@@ -1325,7 +1394,7 @@ async def answer_cmd(update: Update, context: CallbackContext):
             text=(
                 f"🎉 <b>Your trivia question was answered!</b>\n\n"
                 f"🏆 <b>Winner:</b> {safe_guesser}\n"
-                f"🔑 <b>Answer:</b> <code>{html.escape(question['answer_text'])}</code>\n"
+                f"🔑 <b>Winning Guess:</b> <code>{html.escape(matched_answer)}</code>\n"
                 f"🏦 <b>Guess Fees Earned:</b> <code>+{collected:,} CXP</code> ({guesses} guess(es))"
             ),
             parse_mode=ParseMode.HTML,

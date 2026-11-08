@@ -132,7 +132,7 @@ class Database:
                     asker_id BIGINT NOT NULL,
                     asker_name VARCHAR(255),
                     question_text TEXT NOT NULL,
-                    answer_text VARCHAR(255) NOT NULL,
+                    answer_text TEXT NOT NULL,
                     prize_cxp INTEGER NOT NULL,
                     guess_cost INTEGER NOT NULL,
                     collected_cxp INTEGER DEFAULT 0,
@@ -143,6 +143,8 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     closed_at TIMESTAMP
                 );
+
+                ALTER TABLE questions ALTER COLUMN answer_text TYPE TEXT;
 
                 CREATE INDEX IF NOT EXISTS idx_questions_status_id ON questions (status, id);
 
@@ -789,7 +791,7 @@ class Database:
                     asker_id,
                     (asker_name or "")[:255],
                     question_text,
-                    answer_text[:255],
+                    answer_text,
                     prize_cxp,
                     guess_cost,
                     status,
@@ -880,7 +882,12 @@ class Database:
 
                 new_collected = (q_dict["collected_cxp"] or 0) + guess_cost
                 new_guess_count = (q_dict["guess_count"] or 0) + 1
-                is_correct = normalized_guess == q_dict["answer_text"]
+                accepted_answers = [
+                    a.strip()
+                    for a in (q_dict["answer_text"] or "").split(",")
+                    if a.strip()
+                ]
+                is_correct = normalized_guess in accepted_answers
 
                 if not is_correct:
                     _, guesser_new_cxp = await self._adjust_cxp_in_tx(
@@ -948,6 +955,8 @@ class Database:
                     "guesser_new_cxp": guesser_new_cxp,
                     "asker_old_cxp": asker_old_cxp,
                     "asker_new_cxp": asker_new_cxp,
+                    "matched_answer": normalized_guess,
+                    "accepted_answers": accepted_answers,
                     "question": q_dict,
                     "next_question": next_q,
                 }
