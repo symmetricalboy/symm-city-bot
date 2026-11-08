@@ -61,6 +61,7 @@ class Database:
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_channel_admin BOOLEAN DEFAULT FALSE;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blacklisted BOOLEAN DEFAULT FALSE;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_steal_time TIMESTAMP;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS last_gamble_time TIMESTAMP;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -699,6 +700,22 @@ class Database:
         )
         return old_cxp, new_cxp
 
+    async def get_gamble_cooldown_remaining(self, user_id: int) -> int:
+        if not self.pool:
+            return 0
+        async with self.pool.acquire() as conn:
+            elapsed = await conn.fetchval(
+                """
+                SELECT EXTRACT(EPOCH FROM (LOCALTIMESTAMP - last_gamble_time))
+                FROM users
+                WHERE user_id = $1
+                """,
+                user_id,
+            )
+            if elapsed is not None and elapsed < 3600:
+                return max(1, int(3600 - elapsed))
+            return 0
+
     async def place_bet_and_settle(self, user_id: int, bet: int, payout: int) -> dict:
         if not self.pool:
             return {"ok": False, "reason": "db_unavailable"}
@@ -711,8 +728,21 @@ class Database:
                     user_id,
                 )
                 row = await conn.fetchrow(
-                    "SELECT cxp FROM users WHERE user_id = $1 FOR UPDATE", user_id
+                    "SELECT cxp, last_gamble_time FROM users WHERE user_id = $1 FOR UPDATE",
+                    user_id,
                 )
+                if row and row["last_gamble_time"] is not None:
+                    elapsed = await conn.fetchval(
+                        "SELECT EXTRACT(EPOCH FROM (LOCALTIMESTAMP - $1::timestamp))",
+                        row["last_gamble_time"],
+                    )
+                    if elapsed is not None and elapsed < 3600:
+                        return {
+                            "ok": False,
+                            "reason": "cooldown",
+                            "remaining_seconds": max(1, int(3600 - elapsed)),
+                        }
+
                 old_cxp = (row["cxp"] or 0) if row else 0
                 if old_cxp < bet:
                     return {
@@ -724,6 +754,10 @@ class Database:
                 net_delta = payout - bet
                 _, new_cxp = await self._adjust_cxp_in_tx(
                     conn, user_id, net_delta, utc_date
+                )
+                await conn.execute(
+                    "UPDATE users SET last_gamble_time = LOCALTIMESTAMP WHERE user_id = $1",
+                    user_id,
                 )
                 return {
                     "ok": True,

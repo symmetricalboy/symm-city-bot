@@ -376,7 +376,7 @@ async def gamble_cmd(update: Update, context: CallbackContext):
     if not context.args:
         help_text = (
             "🎰 <b>symm.city Slot Machine</b>\n\n"
-            "<b>Usage:</b> <code>/gamble &lt;amount&gt;</code> (e.g. <code>/gamble 50</code>)\n"
+            "<b>Usage:</b> <code>/gamble &lt;amount&gt;</code> (e.g. <code>/gamble 50</code> — 1-hour cooldown)\n"
             "<i>All 3 horizontal rows &amp; both diagonals pay out — and multiple winning lines stack! "
             "Higher bets unlock better symbol odds &amp; multi-line luck!</i>\n\n"
             "<b>3-in-a-Row Paytable (Any Row or Diagonal):</b>\n"
@@ -393,6 +393,18 @@ async def gamble_cmd(update: Update, context: CallbackContext):
         return
 
     safe_name = html.escape(actor_name)
+    cooldown_rem = await db.get_gamble_cooldown_remaining(actor_id)
+    if cooldown_rem > 0:
+        minutes = int(cooldown_rem // 60)
+        seconds = int(cooldown_rem % 60)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            message_thread_id=thread_id,
+            text=f"⏳ <b>{safe_name}</b>, you are on cooldown! Please wait <code>{minutes}m {seconds}s</code> before spinning the slots again.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     raw_arg = context.args[0].strip().lower()
     if raw_arg in ("all", "max"):
         user_data = await db.get_user(actor_id)
@@ -438,7 +450,17 @@ async def gamble_cmd(update: Update, context: CallbackContext):
     settlement = await db.place_bet_and_settle(actor_id, bet, spin["payout"])
 
     if not settlement.get("ok"):
-        if settlement.get("reason") == "insufficient_cxp":
+        if settlement.get("reason") == "cooldown":
+            rem = settlement.get("remaining_seconds", 0)
+            minutes = int(rem // 60)
+            seconds = int(rem % 60)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                message_thread_id=thread_id,
+                text=f"⏳ <b>{safe_name}</b>, you are on cooldown! Please wait <code>{minutes}m {seconds}s</code> before spinning the slots again.",
+                parse_mode=ParseMode.HTML,
+            )
+        elif settlement.get("reason") == "insufficient_cxp":
             cur_cxp = settlement.get("current_cxp", 0)
             if cur_cxp < 0:
                 err_msg = (
