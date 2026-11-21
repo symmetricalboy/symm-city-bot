@@ -447,7 +447,15 @@ async def gamble_cmd(update: Update, context: CallbackContext):
             return
 
     spin = spin_slot_machine(bet)
-    settlement = await db.place_bet_and_settle(actor_id, bet, spin["payout"])
+    settlement = await db.place_bet_and_settle(
+        actor_id,
+        bet,
+        spin["payout"],
+        spin_meta={
+            "multiplier": round(spin["total_multiplier"], 4),
+            "winning_lines": len(spin["winning_lines"]),
+        },
+    )
 
     if not settlement.get("ok"):
         if settlement.get("reason") == "cooldown":

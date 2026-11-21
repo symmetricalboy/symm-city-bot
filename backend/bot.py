@@ -21,6 +21,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from database import db
+from memory_engine import memory_engine
 from handlers.owner_menu import get_config_conversation_handler
 from handlers.channel_admin import get_channel_admin_conversation, handle_post_action, handle_forward_decision
 from handlers.verification import welcome_new_member, verify_user
@@ -67,6 +68,7 @@ from handlers.ai_chat import ask_cmd
 from handlers.time import time_cmd, settime_cmd
 from handlers.ping import ping_cmd
 from handlers.channel_link import set_channel_cmd
+from handlers.history import history_cmd
 from handlers.games import (
     gamble_cmd,
     get_question_conversation_handler,
@@ -237,6 +239,7 @@ def main() -> None:
     )
     application.add_handler(MessageReactionHandler(evaluate_reaction))
     application.add_handler(CommandHandler("level", user_stats_cmd))
+    application.add_handler(CommandHandler("history", history_cmd))
     application.add_handler(CommandHandler("leaderboard", leaderboard_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("commands", commands_cmd))
@@ -355,6 +358,9 @@ def main() -> None:
             logger.error(f"FATAL: Database rejected connection during startup: {e}")
             raise
 
+        # Start continuous chat memory & pgvector embedding worker
+        memory_engine.start_background_worker()
+
         # Initialize telegram-related dependencies
         await application.initialize()
         await application.start()
@@ -393,6 +399,7 @@ def main() -> None:
 
         # Shutdown sequence
         logger.info("Shutting down application...")
+        await memory_engine.stop_background_worker()
         if not PUBLIC_DOMAIN:
             await application.updater.stop()
         await application.stop()

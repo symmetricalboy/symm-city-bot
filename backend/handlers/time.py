@@ -1,29 +1,36 @@
-import logging
-import os
+import html
 import json
-from telegram import Update
-from telegram.constants import ParseMode, ChatAction
-from telegram.ext import CallbackContext
-from google import genai
+import logging
 from datetime import datetime
+from telegram import Update
+from telegram.constants import ChatAction, ParseMode
+from telegram.ext import CallbackContext
 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
-import html
 
 from database import db
+from gemini_service import generate_json, get_gemini_client
 
 logger = logging.getLogger(__name__)
 
-api_key = os.getenv("GEMINI_API_KEY")
-
-try:
-    gemini_client = genai.Client() if api_key else None
-except Exception as e:
-    logger.error("Failed to initialize Gemini client in time.py: %s", e)
-    gemini_client = None
+LOCATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "valid": {"type": "boolean"},
+        "timezone": {
+            "type": "string",
+            "description": "Valid IANA timezone string, e.g. 'America/Chicago', 'Europe/Athens', 'Asia/Tehran'.",
+        },
+        "location_name": {
+            "type": "string",
+            "description": "Clean formatted display name, e.g. 'Minneapolis, MN', 'Athens, Greece'.",
+        },
+    },
+    "required": ["valid", "timezone", "location_name"],
+}
 
 
 def get_ordinal_suffix(day: int) -> str:
@@ -39,13 +46,7 @@ def format_time_string(location_name: str, target_name: str, tz_info: ZoneInfo) 
     day = now.day
     suffix = get_ordinal_suffix(day)
 
-    # Format: Sunday, March 8th - 10:44PM (stripping leading zeros from hour and replacing AM/PM with uppercase)
-    date_str = (
-        now.strftime(f"%A, %B {day}{suffix} - %I:%M%p")
-        .replace("AM", "AM")
-        .replace("PM", "PM")
-    )
-    # Strip leading zero from the 12-hour hour:
+    date_str = now.strftime(f"%A, %B {day}{suffix} - %I:%M%p")
     if " - 0" in date_str:
         date_str = date_str.replace(" - 0", " - ")
 
@@ -55,63 +56,52 @@ def format_time_string(location_name: str, target_name: str, tz_info: ZoneInfo) 
             f"<b>{html.escape(location_name)}</b>\n"
             f"{date_str}"
         )
-    else:
-        return f"<b>{html.escape(location_name)}</b>\n" f"{date_str}"
+    return f"<b>{html.escape(location_name)}</b>\n{date_str}"
 
 
-async def resolve_location(location_str: str) -> dict:
+async def resolve_location(location_str: str) -> dict | None:
     """
-    Given a location string, ask Gemini to parse it into an IANA timezone string
-    format and a clean display name.
-    Expects JSON output: {"timezone": "America/Chicago", "location_name": "Minneapolis, MN"}
-    Returns None if parsing fails.
+    Given a location string, ask Gemini (`gemini-4-neon`) to parse it into an IANA timezone string
+    and a clean display name.
+    Returns {"timezone": "...", "location_name": "..."} or None if invalid.
     """
-    if not gemini_client or not location_str:
+    if not get_gemini_client() or not location_str:
         return None
 
-    prompt = f"""
-    The user provided the following location or timezone string: '{location_str}'
-    
-    You must resolve this into a valid IANA timezone name (e.g. "America/New_York", "Europe/London", "Asia/Tokyo") 
-    and a clean, beautifully formatted location display name (e.g., "Minneapolis, MN", "Tokyo, Japan", "London, UK").
-    
-    Return ONLY a raw JSON object with the following exact keys:
-    {{
-        "timezone": "<valid IANA timezone string>",
-        "location_name": "<clean display name of the location>"
-    }}
-    
-    Do not wrap the JSON in markdown blocks. Output only the JSON payload.
-    If you absolutely cannot determine a valid timezone, return an empty object {{}}.
-    """
+    prompt = (
+        f"Resolve the following location or timezone string into a valid IANA timezone name "
+        f"(e.g. 'America/Chicago', 'Europe/London', 'Asia/Tokyo') and a clean display name "
+        f"(e.g. 'Minneapolis, MN', 'London, UK', 'Tokyo, Japan'). "
+        f"If the input cannot be resolved to a real timezone, set valid=false.\n\n"
+        f"Location input: {location_str}"
+    )
 
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
+        parsed = await generate_json(
+            prompt,
+            LOCATION_SCHEMA,
+            thinking_level="low",
         )
-        data = response.text.strip()
-        # Clean up in case it still added markdown blocks
-        if data.startswith("```json"):
-            data = data[7:]
-        if data.startswith("```"):
-            data = data[3:]
-        if data.endswith("```"):
-            data = data[:-3]
-
-        parsed = json.loads(data.strip())
-        if "timezone" in parsed and "location_name" in parsed:
-            return parsed
+        if (
+            parsed
+            and parsed.get("valid")
+            and parsed.get("timezone")
+            and parsed.get("location_name")
+        ):
+            # Validate ZoneInfo resolves cleanly
+            ZoneInfo(parsed["timezone"])
+            return {
+                "timezone": parsed["timezone"],
+                "location_name": parsed["location_name"],
+            }
         return None
     except Exception as e:
-        logger.error(f"Failed to resolve location via Gemini: {e}")
+        logger.error("Failed to resolve location via Gemini 4 Neon: %s", e)
         return None
 
 
 async def settime_cmd(update: Update, context: CallbackContext):
-    """
-    Handle the /settime <location> command.
-    """
+    """Handle the /settime <location> command."""
     if not update.effective_user or not update.message:
         return
 
@@ -126,7 +116,7 @@ async def settime_cmd(update: Update, context: CallbackContext):
     chat_id = update.effective_chat.id
     thread_id = update.message.message_thread_id
 
-    if not gemini_client:
+    if not get_gemini_client():
         await update.message.reply_text(
             "The AI agent is currently offline. (API key not configured)."
         )
@@ -152,7 +142,6 @@ async def settime_cmd(update: Update, context: CallbackContext):
 
     user_id = update.effective_user.id
 
-    # Store JSON in DB
     try:
         location_json = json.dumps(resolved)
         await db.update_user_location(user_id, location_json)
@@ -162,26 +151,22 @@ async def settime_cmd(update: Update, context: CallbackContext):
             reply_to_message_id=update.message.message_id,
         )
     except Exception as e:
-        logger.error(f"Error saving location for user {user_id}: {e}")
+        logger.error("Error saving location for user %s: %s", user_id, e)
         await update.message.reply_text(
             "An error occurred while trying to save your location. Please try again later.",
         )
 
 
 async def time_cmd(update: Update, context: CallbackContext):
-    """
-    Handle the /time <location | @username> command.
-    """
+    """Handle the /time <location | @username> command."""
     if not update.effective_user or not update.message:
         return
 
     chat_id = update.effective_chat.id
     thread_id = update.message.message_thread_id
-    original_message_id = update.message.message_id
 
     target = " ".join(context.args).strip().lower() if context.args else ""
 
-    # Check for empty target or aliases for symm.city
     city_aliases = [
         "",
         "symm",
@@ -202,13 +187,11 @@ async def time_cmd(update: Update, context: CallbackContext):
 
         if user and user.get("location"):
             try:
-                # Expecting a JSON string as generated by resolve_location in settime
                 resolved_location = json.loads(user["location"])
                 target_name = (
                     user.get("display_name") or f"@{user.get('username') or username}"
                 )
             except json.JSONDecodeError:
-                # Fallback if old plain-text location is in DB. We would need to resolve it on the fly.
                 raw_location = user["location"]
                 target_name = (
                     user.get("display_name") or f"@{user.get('username') or username}"
@@ -223,7 +206,6 @@ async def time_cmd(update: Update, context: CallbackContext):
             )
             return
     else:
-        # Not a user, not an alias, so resolve the raw string entered
         resolved_location = await resolve_location(target)
 
     if not resolved_location:
@@ -234,9 +216,6 @@ async def time_cmd(update: Update, context: CallbackContext):
 
     try:
         tz_info = ZoneInfo(resolved_location["timezone"])
-
-
-        # Generate output string using standard packages
         answer_text = format_time_string(
             resolved_location["location_name"], target_name, tz_info
         )
@@ -250,7 +229,9 @@ async def time_cmd(update: Update, context: CallbackContext):
 
     except Exception as e:
         logger.error(
-            f"Error handling /time command (timezone {resolved_location.get('timezone')}): {e}"
+            "Error handling /time command (timezone %s): %s",
+            resolved_location.get("timezone"),
+            e,
         )
         await context.bot.send_message(
             chat_id=chat_id,

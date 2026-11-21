@@ -28,8 +28,8 @@ SYMM_CITY_KNOWLEDGE = """
   - Built for Android (phone, tablet, Play Games for Windows, Chromebook, Android TV) with custom Bluetooth controller mapping (e.g. Taiko drums, DDR mats, gamepads).
   - Features real-time multiplayer versus modes, ranking systems, leaderboards, stats, sound effects & original music, offline AI bots, and Wi-Fi Direct local multiplayer.
 - **Tech, AI & Software Interests**:
-  - Passionate developer experimenting with AI (Gemini 3.8 Flash, Claude Sonnet, Cursor, local models, Live API, image/video generation).
-  - Creates tools for Bluesky (Lexicons, alt-text bots, AT Protocol tools), Telegram bots, and web applications.
+  - Passionate developer experimenting with AI (Gemini 4 Neon, Claude, Antigravity, local models, Live API, image/video generation, wearable companions like Wristy).
+  - Creates tools for Bluesky (Lexicons, Alty alt-text bot, Ask Everything, FlappySky, AT Protocol tools), Wear OS apps & watchfaces, Telegram bots, and web applications (Comail, symmetricalboy.com).
   - Enjoys creative coding, robotics/automation, Android ecosystem, and UI/UX design.
 
 **symm.city Community Rules:**
@@ -40,10 +40,10 @@ SYMM_CITY_KNOWLEDGE = """
 5. Be *very* symmetrical.
 
 **symm.city Bot Features:**
-- **AI Assistant (/ask <question>)**: Ask questions about symm, his projects, game development, music, thoughts from his post history, or the symm.city community.
+- **AI Assistant (/ask <question>)**: Powered by `gemini-4-neon` with a 250-message floating group chat context window, full chat archive search, continuous long-term member & community memories, and symm's Bluesky post archive.
 - **CXP System (Community XP)**: Earn 50 CXP per chat message (1 min cooldown). Positive emoji reactions give +50 CXP; negative emoji reactions give -50 CXP. Higher-level members have higher reaction multipliers!
 - **Level Titles**: Budding Symmetry (1-4), Bilateral Balance (5-9), Rotational Harmony (10-19), Crystalline Order (20-29), Exquisitely Symmetrical (30-39), Supersymmetric (40-49), Very Symmetrical (50-59), Pure Symmetry (60+).
-- **CXP Commands**: `/level` (view stats & rank), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown).
+- **CXP Commands**: `/level` (view stats & rank), `/history` (view CXP history charts, high/low points, and breakdowns across messages, reactions, gambling, stealing, trivia, and admin gives for any user or timeframe), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown), `/gamble <amount>` (5-line CXP slot machine, 1hr cooldown), `/question` (DM bot to create CXP trivia questions) & `/answer <guess>` (answer active trivia).
 - **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, `/da`, `/ja`, `/ar`, or `/translate` for an interactive menu.
 - **Time Zone Commands**: `/settime <location>` (save your time zone), `/time <location | @username>` (check current time anywhere or for another member; defaults to symm.city time).
 - **Moderation & Alerts**: Mention `@admin` in the group to ping all administrators. Moderation tools include `/mute`, `/unmute`, `/kick`, `/ban`.

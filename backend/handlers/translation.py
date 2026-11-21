@@ -1,22 +1,11 @@
 import logging
-import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatAction
 from telegram.ext import CallbackContext
-from google import genai
 from database import db
+from gemini_service import generate_text, get_gemini_client
 
 logger = logging.getLogger(__name__)
-
-# Initialize the Gemini Client
-# It automatically picks up the GEMINI_API_KEY environment variable if it's set.
-api_key = os.getenv("GEMINI_API_KEY")
-
-try:
-    gemini_client = genai.Client() if api_key else None
-except Exception as e:  # pylint: disable=broad-except
-    logger.error("Failed to initialize Gemini client: %s", e)
-    gemini_client = None
 
 
 async def _typing_indicator_job(context: CallbackContext):
@@ -146,7 +135,7 @@ async def _translate_message(
         return
 
 
-    if not gemini_client:
+    if not get_gemini_client():
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             message_thread_id=update.message.message_thread_id,
@@ -182,12 +171,7 @@ async def _translate_message(
     try:
         prompt = f"Translate this message into {target_language}. Respond ONLY with the translated text, no additional commentary. Preserve any existing formatting and adapt it to Telegram HTML (use <b>, <i>, <a>, <code>, <pre>). Do not wrap the response in markdown code blocks:\n\n{text_to_translate}"
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-        )
-
-        translated_text = response.text.strip()
+        translated_text = (await generate_text(prompt, thinking_level="low")).strip()
         # Remove markdown html formatting wrapping if gemini still adds it
         if translated_text.startswith("```html"):
             translated_text = translated_text.replace("```html", "", 1)
@@ -702,7 +686,7 @@ async def translate_callback(update: Update, context: CallbackContext):
         )
         return
 
-    if not gemini_client:
+    if not get_gemini_client():
         await query.answer(
             "Translation is currently unavailable (API key not configured).",
             show_alert=True,
@@ -737,12 +721,7 @@ async def translate_callback(update: Update, context: CallbackContext):
     try:
         prompt = f"Translate this message into {target_language}. Respond ONLY with the translated text, no additional commentary. Preserve any existing formatting and adapt it to Telegram HTML (use <b>, <i>, <a>, <code>, <pre>). Do not wrap the response in markdown code blocks:\n\n{original_text}"
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-        )
-
-        translated_text = response.text.strip()
+        translated_text = (await generate_text(prompt, thinking_level="low")).strip()
         if translated_text.startswith("```html"):
             translated_text = translated_text.replace("```html", "", 1)
             if translated_text.endswith("```"):

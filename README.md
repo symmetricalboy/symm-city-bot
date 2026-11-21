@@ -2,7 +2,7 @@
 
 [@symmcitybot](https://t.me/symmcitybot) | [symm.city](https://symm.city)
 
-A powerful, modular Telegram bot designed for the **symm.city** community. Built with Python, `python-telegram-bot` (v22+), FastAPI, PostgreSQL (`asyncpg`), and Google Gemini (`gemini-3.8-flash`).
+A powerful, modular Telegram bot designed for the **symm.city** community. Built with Python, `python-telegram-bot` (v22+), FastAPI, PostgreSQL (`asyncpg` + `pgvector`), and Google Gemini (`gemini-4-neon` + `gemini-embedding-2`).
 
 ---
 
@@ -23,17 +23,19 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
      * *Lvl 30-39:* Exquisitely Symmetrical | *Lvl 40-49:* Supersymmetric
      * *Lvl 50-59:* Very Symmetrical | *Lvl 60+:* Pure Symmetry
 - **Leaderboards**: View the top active members globally (`/leaderboard`) or filter by timeframe (`/leaderboard day`, `week`, `month`).
+- **History & Charts**: Inspect detailed CXP balance charts, timeframe high/low peaks, and full source breakdowns across messages, reactions, gambling, stealing, trivia, and admin grants (`/history`, `/history today`, `/history @username month` in any order).
 - **Contests**: Admins can use `/setcontest` to define a specific date range for special events, trackable via `/contest`.
 - **Mini-Games & Trivia**: Users can use `/steal` to attempt to steal up to 25-100 CXP from a random user with available CXP (1-hour cooldown), `/gamble <amount>` to spin the CXP slot machine (1-hour cooldown, with payouts and odds scaling with bet size), or DM `/question` to host CXP trivia questions in the group (`/answer`, `/cancel`).
 
-### 🤖 Grounded AI Assistant (`/ask`)
-- **Grounded in Bluesky History**: Grounded in symmetricalboy's full Bluesky post archive using BM25 semantic retrieval, plus core knowledge of symm's projects (Symmetris, music, software, tech).
-- **Powered by Gemini 3.8 Flash**: High-speed, accurate responses tailored to community inquiries.
+### 🤖 Continual-Memory AI Assistant (`/ask`)
+- **250-Message Floating Context Window**: Injects the ~250 most recent conversational messages from the group chat so `/ask` understands ongoing threads, jokes, and multi-turn replies.
+- **Continuous Long-Term Memory & Member Profiles**: Continuously digests group chat history into PostgreSQL (`group_chat_messages`, `user_memory_profiles`, `memory_documents`, `memory_keyword_index`, and `768`-dim `pgvector` embeddings via `gemini-embedding-2`), learning about members, projects, gear, and community lore over time.
+- **Agentic Archive Search & Bluesky Grounding**: Uses `gemini-4-neon` via the Interactions API with live database tools (`search_chat_history`, `get_member_memories`, `remember_fact`) plus BM25 retrieval over symmetricalboy's Bluesky post archive.
 
 ### 🌐 Translation & Internationalization
 - **Quick Translation**: Start or reply to a message with a language code command to instantly translate it (e.g. `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, `/da`, `/ja`, `/ar`).
 - **Interactive Menu**: Reply to any message with `/translate` to open an inline button menu with language options.
-- **Smart Formatting**: Powered by `gemini-3.8-flash`, preserving Telegram HTML tags and original author attribution.
+- **Smart Formatting**: Powered by `gemini-4-neon`, preserving Telegram HTML tags and original author attribution.
 
 ### ⏰ Time Zone Management
 - **Check Times**: Easily check the exact time for a specific location (`/time London`), symm.city default (`/time`), or another user (`/time @username`).
@@ -55,7 +57,7 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
 - **Python 3.14+** & [Poetry](https://python-poetry.org/docs/#installation)
 - **PostgreSQL Database**
 - **Telegram Bot Token** (obtain from [@BotFather](https://t.me/BotFather))
-- **Google Gemini API Key** (for `gemini-3.8-flash` AI & translation features)
+- **Google Gemini API Key** (for `gemini-4-neon` AI, continuous memory digestion, & translation features)
 
 ---
 

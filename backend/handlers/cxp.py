@@ -290,10 +290,118 @@ async def _announce_level_up(context: CallbackContext, user, new_level: int):
             logger.error("Failed to send level up announcement: %s", e)
 
 
-async def _process_db_message_and_cxp(
-    context: CallbackContext, chat_id: int, msg_id: int, user
+def _extract_message_content_and_media(
+    message, is_forum: bool = False
+) -> tuple[str, str | None, int | None]:
+    """Extract readable message content, media_type, and true reply_to_message_id for memory archiving."""
+    base_text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    media_type = None
+    media_tag = ""
+
+    if getattr(message, "photo", None):
+        media_type = "photo"
+        media_tag = "[Photo]"
+    elif getattr(message, "sticker", None):
+        media_type = "sticker"
+        emoji = getattr(message.sticker, "emoji", "") or ""
+        media_tag = f"[Sticker {emoji}]".strip() if emoji else "[Sticker]"
+    elif getattr(message, "voice", None):
+        media_type = "voice"
+        media_tag = "[Voice Message]"
+    elif getattr(message, "video_note", None):
+        media_type = "video_note"
+        media_tag = "[Video Note]"
+    elif getattr(message, "animation", None):
+        media_type = "animation"
+        media_tag = "[GIF]"
+    elif getattr(message, "video", None):
+        media_type = "video"
+        media_tag = "[Video]"
+    elif getattr(message, "audio", None):
+        media_type = "audio"
+        title = getattr(message.audio, "title", None) or getattr(message.audio, "file_name", None)
+        media_tag = f"[Audio: {title}]" if title else "[Audio]"
+    elif getattr(message, "document", None):
+        media_type = "document"
+        fname = getattr(message.document, "file_name", None)
+        media_tag = f"[File: {fname}]" if fname else "[File]"
+    elif getattr(message, "poll", None):
+        media_type = "poll"
+        q = getattr(message.poll, "question", "")
+        media_tag = f"[Poll: {q}]" if q else "[Poll]"
+
+    if media_tag and base_text:
+        content = f"{media_tag} {base_text}"
+    elif media_tag:
+        content = media_tag
+    else:
+        content = base_text
+
+    reply_to_id = None
+    reply_msg = getattr(message, "reply_to_message", None)
+    if reply_msg:
+        r_id = reply_msg.message_id
+        thread_id = getattr(message, "message_thread_id", None)
+        is_topic_root = is_forum and (
+            (thread_id is None and r_id == 1)
+            or (thread_id is not None and r_id == thread_id)
+        )
+        if not is_topic_root:
+            reply_to_id = r_id
+
+    return content, media_type, reply_to_id
+
+
+async def _archive_group_message_only(
+    chat_id: int,
+    msg_id: int,
+    user_id: int,
+    sender_name: str | None,
+    sender_username: str | None,
+    content: str,
+    *,
+    reply_to_message_id: int | None = None,
+    thread_id: int | None = None,
+    media_type: str | None = None,
+    created_at: datetime | None = None,
 ):
-    """Background task to save the message and award CXP without blocking the chat."""
+    """Record a rate-limited message in `messages` and `group_chat_messages` without awarding CXP."""
+    await db.record_message(chat_id, msg_id, user_id)
+    if content:
+        await db.record_group_chat_message(
+            chat_id=chat_id,
+            message_id=msg_id,
+            user_id=user_id,
+            sender_name=sender_name,
+            sender_username=sender_username,
+            content=content,
+            is_bot=False,
+            reply_to_message_id=reply_to_message_id,
+            thread_id=thread_id,
+            media_type=media_type,
+            created_at=created_at,
+        )
+        try:
+            from memory_engine import memory_engine
+
+            memory_engine.notify_new_message()
+        except Exception as e:
+            logger.debug("Memory engine notify skipped: %s", e)
+
+
+async def _process_db_message_and_cxp(
+    context: CallbackContext,
+    chat_id: int,
+    msg_id: int,
+    user,
+    *,
+    content: str = "",
+    reply_to_message_id: int | None = None,
+    thread_id: int | None = None,
+    media_type: str | None = None,
+    created_at: datetime | None = None,
+):
+    """Background task to save the message, archive for AI memory, and award CXP without blocking the chat."""
     await db.record_message(chat_id, msg_id, user.id)
     first_name = getattr(user, "first_name", None)
     if first_name:
@@ -303,14 +411,42 @@ async def _process_db_message_and_cxp(
         display_name = getattr(
             user, "title", getattr(user, "username", f"User {user.id}")
         )
-    await db.update_user_display_name(
-        user.id, display_name, getattr(user, "username", None)
-    )
+    username = getattr(user, "username", None)
+    await db.update_user_display_name(user.id, display_name, username)
+
+    if content:
+        await db.record_group_chat_message(
+            chat_id=chat_id,
+            message_id=msg_id,
+            user_id=user.id,
+            sender_name=display_name,
+            sender_username=username,
+            content=content,
+            is_bot=False,
+            reply_to_message_id=reply_to_message_id,
+            thread_id=thread_id,
+            media_type=media_type,
+            created_at=created_at,
+        )
+        try:
+            from memory_engine import memory_engine
+
+            memory_engine.notify_new_message()
+        except Exception as e:
+            logger.debug("Memory engine notify skipped: %s", e)
 
     user_data = await db.get_user(user.id)
     current_cxp = user_data.get("cxp", 0) if user_data else 0
     old_level = calculate_level(current_cxp)
-    success = await db.update_user_cxp(user.id, MESSAGE_CXP, update_timestamp=True)
+    success = await db.update_user_cxp(
+        user.id,
+        MESSAGE_CXP,
+        update_timestamp=True,
+        category="message",
+        sub_type="chat",
+        reference_id=msg_id,
+        metadata={"chat_id": chat_id},
+    )
     if success:
         new_level = calculate_level(current_cxp + MESSAGE_CXP)
         if new_level > old_level:
@@ -403,14 +539,42 @@ async def track_message_activity(update: Update, context: CallbackContext):
     # Fast in-memory cache update for reactions
     MESSAGE_AUTHOR_CACHE.put((chat_id, update.message.message_id), user_id)
 
+    is_forum = bool(getattr(update.effective_chat, "is_forum", False))
+    content, media_type, reply_to_id = _extract_message_content_and_media(
+        update.message, is_forum=is_forum
+    )
+    msg_thread_id = getattr(update.message, "message_thread_id", None)
+    msg_date = getattr(update.message, "date", None)
+
+    first_name = getattr(user_obj, "first_name", None)
+    if first_name:
+        last_name = getattr(user_obj, "last_name", None)
+        sender_name = first_name + (f" {last_name}" if last_name else "")
+    else:
+        sender_name = getattr(
+            user_obj, "title", getattr(user_obj, "username", f"User {user_id}")
+        )
+    sender_username = getattr(user_obj, "username", None)
+
     # Fast in-memory rate limiting check
     now = datetime.now()
     last_msg_time = RATE_LIMIT_CACHE.get(user_id)
 
     if last_msg_time and (now - last_msg_time).total_seconds() < RATE_LIMIT_SECONDS:
-        # Rate limited. Just log the message in the background, skip CXP.
+        # Rate limited for CXP, so archive message + feed AI floating context/memory without CXP.
         context.application.create_task(
-            db.record_message(chat_id, update.message.message_id, user_id)
+            _archive_group_message_only(
+                chat_id,
+                update.message.message_id,
+                user_id,
+                sender_name,
+                sender_username,
+                content,
+                reply_to_message_id=reply_to_id,
+                thread_id=msg_thread_id,
+                media_type=media_type,
+                created_at=msg_date,
+            )
         )
         return
 
@@ -424,6 +588,11 @@ async def track_message_activity(update: Update, context: CallbackContext):
             chat_id,
             update.message.message_id,
             user_obj,
+            content=content,
+            reply_to_message_id=reply_to_id,
+            thread_id=msg_thread_id,
+            media_type=media_type,
+            created_at=msg_date,
         )
     )
 
@@ -530,7 +699,19 @@ async def evaluate_reaction(update: Update, context: CallbackContext):
             return
 
         old_level = calculate_level(author_data.get("cxp", 0))
-        await db.update_user_cxp(author_id, total_delta)
+        await db.update_user_cxp(
+            author_id,
+            total_delta,
+            category="reaction",
+            sub_type="positive" if total_delta > 0 else "negative",
+            counterparty_id=reactor_id,
+            reference_id=reaction_update.message_id,
+            metadata={
+                "multiplier": round(multiplier, 2),
+                "added": added,
+                "removed": removed,
+            },
+        )
         new_data = await db.get_user(author_id)
         new_cxp = new_data.get("cxp", 0)
         new_level = calculate_level(new_cxp)
@@ -989,7 +1170,13 @@ async def give_cxp_cmd(update: Update, context: CallbackContext):
         await db.update_user_display_name(target_id, target_name, clean_user)
 
     old_level = calculate_level(target_data.get("cxp", 0))
-    await db.update_user_cxp(target_id, delta_cxp)
+    await db.update_user_cxp(
+        target_id,
+        delta_cxp,
+        category="admin_give",
+        sub_type="grant" if delta_cxp > 0 else "deduct",
+        counterparty_id=actor_id,
+    )
     new_data = await db.get_user(target_id)
     new_cxp = new_data.get("cxp", 0)
     new_level = calculate_level(new_cxp)
