@@ -33,6 +33,7 @@ from handlers.cxp import (
     user_stats_cmd,
     leaderboard_cmd,
     give_cxp_cmd,
+    admin_give_cxp_cmd,
     get_id_cmd,
     set_admin_cmd,
     steal_cxp_cmd,
@@ -298,7 +299,15 @@ def main() -> None:
     application.add_handler(
         CommandHandler(["rules", "rule", "guidelines"], rules_cmd)
     )
-    application.add_handler(CommandHandler(["give", "grant", "award"], give_cxp_cmd))
+    application.add_handler(
+        CommandHandler(["give", "gift", "donate", "send"], give_cxp_cmd)
+    )
+    application.add_handler(
+        CommandHandler(
+            ["admingive", "admingift", "admindonate", "adminsend"],
+            admin_give_cxp_cmd,
+        )
+    )
     application.add_handler(CommandHandler(["checkid", "uid", "whois"], get_id_cmd))
     application.add_handler(CommandHandler("setadmin", set_admin_cmd))
     application.add_handler(

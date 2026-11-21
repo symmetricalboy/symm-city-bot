@@ -1227,9 +1227,470 @@ async def get_id_cmd(update: Update, context: CallbackContext):
         )
 
 
+def _parse_signed_cxp_token(raw: str) -> int | None:
+    """Parse a signed integer CXP value (allowing leading +/- and commas/underscores), or None."""
+    if not raw:
+        return None
+    cleaned = raw.strip().replace(",", "").replace("_", "")
+    if not cleaned:
+        return None
+    sign = 1
+    if cleaned[0] in ("+", "-"):
+        if cleaned[0] == "-":
+            sign = -1
+        cleaned = cleaned[1:]
+    if not cleaned or not cleaned.isdigit():
+        return None
+    try:
+        return sign * int(cleaned)
+    except ValueError:
+        return None
+
+
+def _extract_give_amount_and_target_tokens(
+    update: Update,
+    args: list[str] | None,
+    *,
+    allow_all: bool = False,
+) -> tuple[int | None, bool, list[str], object | None]:
+    """
+    Parse command arguments into (amount, transfer_all, remaining_target_tokens, text_mention_user).
+    Supports amount and @username / display name in either order (e.g. `/give 100 @user` or `/give @user 100`),
+    optional `all`/`max` (when allow_all=True), comma-formatted numbers (`1,000`), and optional trailing `cxp` unit.
+    """
+    tokens = [t.strip() for t in (args or []) if t and t.strip()]
+
+    text_mention_user = None
+    protected_indices: set[int] = set()
+
+    if update.message:
+        entities = update.message.parse_entities(["text_mention"])
+        for ent, ent_text in entities.items():
+            if ent.user:
+                text_mention_user = ent.user
+                prot_parts = ent_text.strip().split()
+                if prot_parts:
+                    plen = len(prot_parts)
+                    for i in range(len(tokens) - plen + 1):
+                        if [t.lower() for t in tokens[i : i + plen]] == [
+                            p.lower() for p in prot_parts
+                        ]:
+                            for j in range(i, i + plen):
+                                protected_indices.add(j)
+                            break
+                break
+
+    for idx, tok in enumerate(tokens):
+        if tok.startswith("@"):
+            protected_indices.add(idx)
+
+    amount: int | None = None
+    transfer_all = False
+    consumed: set[int] = set()
+
+    for idx, tok in enumerate(tokens):
+        if idx in protected_indices:
+            continue
+        low = tok.lower()
+        if allow_all and low in ("all", "max"):
+            transfer_all = True
+            consumed.add(idx)
+            if (idx + 1) < len(tokens) and (idx + 1) not in protected_indices:
+                if tokens[idx + 1].lower() == "cxp":
+                    consumed.add(idx + 1)
+            break
+        parsed = _parse_signed_cxp_token(tok)
+        if parsed is not None:
+            amount = parsed
+            consumed.add(idx)
+            if (idx + 1) < len(tokens) and (idx + 1) not in protected_indices:
+                if tokens[idx + 1].lower() == "cxp":
+                    consumed.add(idx + 1)
+            break
+
+    remaining = [tok for idx, tok in enumerate(tokens) if idx not in consumed]
+    return amount, transfer_all, remaining, text_mention_user
+
+
+async def _resolve_transfer_target(
+    update: Update,
+    context: CallbackContext,
+    remaining_args: list[str],
+    text_mention_user,
+    *,
+    forbid_unlinked_channels: bool = True,
+) -> tuple[int | None, str | None, str | None, str | None]:
+    """
+    Resolve (target_id, target_name, target_username, error_html) for /give and /admingive.
+    Explicit arguments / text_mentions take priority and never silently fall back to a reply target on typo.
+    """
+    tid: int | None = None
+    tname: str | None = None
+    tuser: str | None = None
+
+    if text_mention_user is not None:
+        if getattr(text_mention_user, "is_bot", False):
+            return None, None, None, "❌ You cannot give CXP to a bot!"
+        tid = text_mention_user.id
+        tname = text_mention_user.first_name + (
+            f" {text_mention_user.last_name}" if text_mention_user.last_name else ""
+        )
+        tuser = getattr(text_mention_user, "username", None)
+    elif remaining_args:
+        arg_str = " ".join(remaining_args).strip()
+        resolved_id, resolved_name = await resolve_username(arg_str, update, context)
+        if not resolved_id:
+            return (
+                None,
+                None,
+                None,
+                f"❌ Could not find user <code>{html.escape(arg_str)}</code>. "
+                f"Please check the @username or reply directly to their message!",
+            )
+        tid = resolved_id
+        tname = resolved_name
+    else:
+        if update.message and update.message.reply_to_message and not getattr(
+            update.message, "is_automatic_forward", False
+        ):
+            reply_msg = update.message.reply_to_message
+            is_forum = bool(getattr(update.effective_chat, "is_forum", False))
+            thread_id = update.message.message_thread_id
+            is_topic_root = (
+                getattr(reply_msg, "forum_topic_created", None) is not None
+                or (
+                    update.message.is_topic_message
+                    and reply_msg.message_id == thread_id
+                )
+                or (is_forum and thread_id is None and reply_msg.message_id == 1)
+            )
+            if not is_topic_root:
+                if reply_msg.sender_chat:
+                    tid = reply_msg.sender_chat.id
+                    tname = (
+                        reply_msg.sender_chat.title
+                        or reply_msg.sender_chat.username
+                        or f"Channel {tid}"
+                    )
+                    tuser = getattr(reply_msg.sender_chat, "username", None)
+                elif reply_msg.from_user:
+                    if getattr(reply_msg.from_user, "is_bot", False):
+                        return None, None, None, "❌ You cannot give CXP to a bot!"
+                    ru = reply_msg.from_user
+                    tid = ru.id
+                    tname = ru.first_name + (f" {ru.last_name}" if ru.last_name else "")
+                    tuser = getattr(ru, "username", None)
+
+    if tid is None:
+        return None, None, None, None
+
+    if tid < 0:
+        owner_id = await db.get_channel_owner(tid)
+        if owner_id:
+            db_owner = await db.get_user(owner_id)
+            owner_name = (
+                (db_owner.get("display_name") if db_owner else None)
+                or (
+                    f"@{db_owner['username']}"
+                    if db_owner and db_owner.get("username")
+                    else None
+                )
+                or tname
+                or f"User {owner_id}"
+            )
+            tid = owner_id
+            tname = owner_name
+            tuser = db_owner.get("username") if db_owner else None
+        elif forbid_unlinked_channels:
+            return (
+                None,
+                None,
+                None,
+                "❌ That channel or chat is not linked to a player account, so it cannot receive CXP.",
+            )
+
+    if tid in (777000, 136817688, 1087968824) or tid == getattr(context.bot, "id", None):
+        return None, None, None, "❌ You cannot give CXP to a bot or system account!"
+
+    return tid, tname, tuser, None
+
+
 async def give_cxp_cmd(update: Update, context: CallbackContext):
-    """Admin only: /give <val> [@username/reply]. Grant or remove CXP."""
-    if not update.effective_user or not update.message:
+    """Member command: /give <amount|all> [@username/reply] (aliases: /gift, /donate, /send). Transfer own CXP to another player."""
+    if not update.effective_chat or not update.message:
+        return
+
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(
+            "🎁 Please use <code>/give &lt;amount&gt; @username</code> (or reply to a message) inside the group chat!",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    config = await db.get_config()
+    main_group_id = config.get("main_group_id") if config else None
+    if not main_group_id or update.effective_chat.id != main_group_id:
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id
+
+    # Resolve sender (supporting personal accounts and linked channels)
+    sender_id: int | None = None
+    sender_name: str = ""
+    sender_username: str | None = None
+
+    if update.effective_user and not getattr(update.effective_user, "is_bot", True):
+        u = update.effective_user
+        sender_id = u.id
+        sender_name = u.first_name + (f" {u.last_name}" if u.last_name else "")
+        sender_username = u.username
+    elif update.message.sender_chat:
+        sender_chat = update.message.sender_chat
+        if getattr(sender_chat, "type", "") == "channel":
+            owner_id = await db.get_channel_owner(sender_chat.id)
+            if not owner_id:
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+                bot_username = context.bot.username
+                keyboard = (
+                    InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🔗 Link Channel",
+                                    url=f"https://t.me/{bot_username}?start=setchannel",
+                                )
+                            ]
+                        ]
+                    )
+                    if bot_username
+                    else None
+                )
+                await update.message.reply_text(
+                    "⚠️ Please link your channel to your user account first before giving CXP.",
+                    reply_markup=keyboard,
+                )
+                return
+            sender_id = owner_id
+            db_sender = await db.get_user(owner_id)
+            sender_name = (
+                (db_sender.get("display_name") if db_sender else None)
+                or sender_chat.title
+                or f"User {owner_id}"
+            )
+            sender_username = db_sender.get("username") if db_sender else None
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text="⚠️ Anonymous group admins don't have a personal CXP balance — please switch to your personal account (or a linked channel) to give CXP!",
+            )
+            return
+    else:
+        return
+
+    if not context.args:
+        help_html = (
+            "🎁 <b>Give CXP to Another Player</b>\n\n"
+            "<b>Usage:</b>\n"
+            "• Reply to a message with <code>/give &lt;amount|all&gt;</code>\n"
+            "• Or mention a player: <code>/give &lt;amount|all&gt; @username</code> (in either order)\n"
+            "<i>Aliases:</i> <code>/gift</code>, <code>/donate</code>, <code>/send</code>"
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=help_html,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    amount, transfer_all, remaining_args, text_mention_user = (
+        _extract_give_amount_and_target_tokens(
+            update, context.args, allow_all=True
+        )
+    )
+
+    target_id, target_name, target_username, target_err = await _resolve_transfer_target(
+        update,
+        context,
+        remaining_args,
+        text_mention_user,
+        forbid_unlinked_channels=True,
+    )
+
+    if target_err:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=target_err,
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if target_id is None:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=(
+                "❌ Please specify who to give CXP to — e.g. "
+                "<code>/give 100 @username</code> or reply to their message with <code>/give 100</code>."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if target_id == sender_id:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text="❌ You cannot give CXP to yourself!",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not transfer_all:
+        if amount is None:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text=(
+                    "❌ Please specify a valid CXP amount (at least <code>1</code>), "
+                    "e.g. <code>/give 100 @username</code>."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if amount < 1:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text=(
+                    f"❌ You cannot give <code>{amount:,} CXP</code> — "
+                    f"the amount must be at least <code>1 CXP</code>!"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+    # Reject bot recipients if resolved via @username or numeric ID
+    if target_id > 0:
+        try:
+            member = await context.bot.get_chat_member(main_group_id, target_id)
+            if member and getattr(member.user, "is_bot", False):
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    text="❌ You cannot give CXP to a bot!",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+        except Exception:
+            pass
+
+    # Keep sender & recipient display names fresh in DB
+    if sender_name:
+        await db.update_user_display_name(sender_id, sender_name, sender_username)
+
+    target_data = await db.get_user(target_id)
+    if target_name and (
+        not target_data
+        or not target_data.get("display_name")
+        or (target_username and not target_data.get("username"))
+    ):
+        clean_user = target_username or (
+            target_name.lstrip("@") if target_name.startswith("@") else None
+        )
+        await db.update_user_display_name(target_id, target_name, clean_user)
+    elif target_data and target_data.get("display_name") and (not target_name or target_name.startswith("@")):
+        target_name = target_data["display_name"]
+
+    if not target_name:
+        target_name = f"User {target_id}"
+
+    safe_sender = html.escape(sender_name or f"User {sender_id}")
+    safe_target = html.escape(target_name)
+
+    res = await db.transfer_cxp(
+        sender_id=sender_id,
+        recipient_id=target_id,
+        amount=amount,
+        transfer_all=transfer_all,
+        reference_id=update.message.message_id,
+    )
+
+    if not res.get("ok"):
+        if res.get("reason") == "insufficient_cxp":
+            cur_cxp = res.get("current_cxp", 0)
+            if transfer_all:
+                if cur_cxp < 0:
+                    err_msg = (
+                        f"❌ You cannot give CXP right now, <b>{safe_sender}</b> — "
+                        f"your balance is currently negative (<code>{cur_cxp:,} CXP</code>)."
+                    )
+                else:
+                    err_msg = (
+                        f"❌ You cannot give CXP right now, <b>{safe_sender}</b> — "
+                        f"you currently have <code>0 CXP</code> available."
+                    )
+            elif cur_cxp < 0:
+                err_msg = (
+                    f"❌ You cannot give <code>{amount:,} CXP</code>, <b>{safe_sender}</b> — "
+                    f"your balance is currently negative (<code>{cur_cxp:,} CXP</code>), so you have no CXP available to give."
+                )
+            elif cur_cxp == 0:
+                err_msg = (
+                    f"❌ You cannot give <code>{amount:,} CXP</code>, <b>{safe_sender}</b> — "
+                    f"you currently have <code>0 CXP</code> available."
+                )
+            else:
+                err_msg = (
+                    f"❌ You cannot give <code>{amount:,} CXP</code>, <b>{safe_sender}</b> — "
+                    f"you only have <code>{cur_cxp:,} CXP</code> available."
+                )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text=err_msg,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text="❌ Could not complete CXP transfer right now. Please try again.",
+            )
+        return
+
+    transferred = res["amount"]
+    sender_new = res["sender_new_cxp"]
+    recipient_old = res["recipient_old_cxp"]
+    recipient_new = res["recipient_new_cxp"]
+    old_lvl = calculate_level(recipient_old)
+    new_lvl = calculate_level(recipient_new)
+    lvl_note = (
+        f" 🎉 <i>(Level Up! Lvl {old_lvl} → {new_lvl})</i>"
+        if new_lvl > old_lvl
+        else f" <i>(Lvl {new_lvl})</i>"
+    )
+
+    msg = (
+        f"🎁 <b>{safe_sender}</b> gave <code>{transferred:,} CXP</code> to <b>{safe_target}</b>!\n"
+        f"💰 <b>{safe_sender}:</b> <code>{sender_new:,} CXP</code>  •  "
+        f"<b>{safe_target}:</b> <code>{recipient_new:,} CXP</code>{lvl_note}"
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        message_thread_id=thread_id,
+        text=msg,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def admin_give_cxp_cmd(update: Update, context: CallbackContext):
+    """Admin only: /admingive <val> [@username/reply] (aliases: /admingift, /admindonate, /adminsend). Mint or deduct CXP."""
+    if not update.effective_user or not update.message or not update.effective_chat:
         return
 
     if (
@@ -1245,78 +1706,48 @@ async def give_cxp_cmd(update: Update, context: CallbackContext):
     if not main_group_id or update.effective_chat.id != main_group_id:
         return
 
-    # Determine actor identity (User or Channel)
+    # Determine actor identity (User, Linked Channel Owner, or Anonymous Admin Group)
     actor_id = update.effective_user.id
+    is_authorized = False
     if getattr(update.effective_user, "is_bot", True) and update.message.sender_chat:
-        actor_id = update.message.sender_chat.id
+        sc = update.message.sender_chat
+        actor_id = sc.id
+        if sc.id == main_group_id:
+            is_authorized = True
+        elif getattr(sc, "type", "") == "channel":
+            owner_id = await db.get_channel_owner(sc.id)
+            if owner_id and await is_user_admin(owner_id, main_group_id, context):
+                actor_id = owner_id
+                is_authorized = True
 
-    if not await is_user_admin(actor_id, main_group_id, context):
+    if not is_authorized and not await is_user_admin(actor_id, main_group_id, context):
         return
 
-    # Parse args (could be /give 100 @user or /give @user 100)
-    args = context.args
-    if not args and not update.message.reply_to_message:
+    if not context.args:
         await update.message.reply_text(
-            "Usage: `/give <amount> [@username]` or reply to a message with `/give <amount>`",
-            parse_mode="Markdown",
+            "Usage: <code>/admingive &lt;amount&gt; [@username]</code> or reply to a message with <code>/admingive &lt;amount&gt;</code>\n"
+            "<i>Aliases:</i> <code>/admingift</code>, <code>/admindonate</code>, <code>/adminsend</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    target_id = None
-    target_name = None
-    delta_cxp = None
-
-    # Try reply target
-    # Channels automatically "reply" to the root channel post when posting in the discussion group.
-    # We must explicitly exclude `is_automatic_forward` logic and topic roots.
-    target_chat = None
-    target_user = None
-
-    if update.message.reply_to_message and not getattr(
-        update.message, "is_automatic_forward", False
-    ):
-        # If it's a forum topic, ignore the implicit reply to the topic starter message
-        if (
-            update.message.is_topic_message
-            and update.message.reply_to_message.message_id
-            == update.message.message_thread_id
-        ):
-            pass
-        else:
-            target_chat = update.message.reply_to_message.sender_chat
-            target_user = update.message.reply_to_message.from_user
-
-    if target_chat:
-        target_id = target_chat.id
-        target_name = (
-            target_chat.title or target_chat.username or f"Channel {target_id}"
+    delta_cxp, _, remaining_args, text_mention_user = (
+        _extract_give_amount_and_target_tokens(
+            update, context.args, allow_all=False
         )
-    elif target_user and not getattr(target_user, "is_bot", False):
-        target_id = target_user.id
-        target_name = target_user.first_name
+    )
 
-    # Parse args to support varying formats: `/give 1000 @usr`, `/give John Doe 1000`
-    arg_str = None
-    target_args = []
+    target_id, target_name, target_username, target_err = await _resolve_transfer_target(
+        update,
+        context,
+        remaining_args,
+        text_mention_user,
+        forbid_unlinked_channels=False,
+    )
 
-    for arg in args:
-        if delta_cxp is None:
-            try:
-                delta_cxp = int(arg)
-                continue
-            except ValueError:
-                pass
-        target_args.append(arg)
-
-    if target_args:
-        arg_str = " ".join(target_args)
-
-    # Attempt resolution to allow explicit usernames to override a reply target
-    # If no explicit @ string was found, still pass it through for text_mentions
-    resolved_id, resolved_name = await resolve_username(arg_str, update, context)
-    if resolved_id:
-        target_id = resolved_id
-        target_name = resolved_name
+    if target_err:
+        await update.message.reply_text(target_err, parse_mode=ParseMode.HTML)
+        return
 
     if target_id is None:
         await update.message.reply_text(
@@ -1324,35 +1755,48 @@ async def give_cxp_cmd(update: Update, context: CallbackContext):
         )
         return
 
-    if delta_cxp is None:
-        await update.message.reply_text("Invalid amount provided.")
+    if delta_cxp is None or delta_cxp == 0:
+        await update.message.reply_text(
+            "Invalid amount provided (must be a non-zero whole number)."
+        )
         return
 
-    # Safely fetch target and update
     target_data = await db.get_user(target_id)
     if not target_data:
         await update.message.reply_text("Could not fetch target user data.")
         return
 
-    if target_name and (not target_data.get("display_name") or not target_data.get("username")):
-        clean_user = target_name.lstrip("@") if target_name.startswith("@") else None
+    if target_name and (
+        not target_data.get("display_name")
+        or (target_username and not target_data.get("username"))
+    ):
+        clean_user = target_username or (
+            target_name.lstrip("@") if target_name.startswith("@") else None
+        )
         await db.update_user_display_name(target_id, target_name, clean_user)
+    elif target_data.get("display_name") and (not target_name or target_name.startswith("@")):
+        target_name = target_data["display_name"]
 
-    old_level = calculate_level(target_data.get("cxp", 0))
     await db.update_user_cxp(
         target_id,
         delta_cxp,
         category="admin_give",
         sub_type="grant" if delta_cxp > 0 else "deduct",
         counterparty_id=actor_id,
+        reference_id=update.message.message_id,
     )
     new_data = await db.get_user(target_id)
     new_cxp = new_data.get("cxp", 0)
     new_level = calculate_level(new_cxp)
 
     action = "granted" if delta_cxp > 0 else "removed"
-    msg = f"✅ Successfully {action} {abs(delta_cxp):,} CXP to {target_name}. Their new total is {new_cxp:,} CXP (Level {new_level})."
-    await update.message.reply_text(msg)
+    prep = "to" if delta_cxp > 0 else "from"
+    safe_target = html.escape(target_name or f"User {target_id}")
+    msg = (
+        f"✅ Successfully {action} <code>{abs(delta_cxp):,} CXP</code> {prep} "
+        f"<b>{safe_target}</b>. Their new total is <code>{new_cxp:,} CXP</code> (Level {new_level})."
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 async def set_admin_cmd(update: Update, context: CallbackContext):

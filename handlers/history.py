@@ -798,6 +798,14 @@ def build_cxp_history_report(
             "questions_asked": 0,
             "wrong_guesses": 0,
         },
+        "give": {
+            "net": 0,
+            "gained": 0,
+            "lost": 0,
+            "count": 0,
+            "sent_count": 0,
+            "received_count": 0,
+        },
         "admin_give": {"net": 0, "gained": 0, "lost": 0, "count": 0},
         "other": {"net": 0, "gained": 0, "lost": 0, "count": 0},
         "legacy": {"net": 0, "gained": 0, "lost": 0, "count": 0},
@@ -841,6 +849,11 @@ def build_cxp_history_report(
                 bucket["questions_asked"] += 1
             elif sub == "wrong_guesses" or sub == "wrong_guess":
                 bucket["wrong_guesses"] += 1
+        elif cat_key == "give":
+            if sub == "received" or d > 0:
+                bucket["received_count"] += 1
+            elif sub == "sent" or d < 0:
+                bucket["sent_count"] += 1
 
     # Build trajectory vertices for plotting
     plot_points: list[tuple[datetime, int, bool]] = [
@@ -929,18 +942,18 @@ def render_history_chart_png(target_name: str, report: dict) -> io.BytesIO:
     col_loss_bright = "#fb7185"
     col_neutral = "#38bdf8"
 
-    fig = Figure(figsize=(10.0, 6.8), dpi=150, facecolor=bg_fig)
+    fig = Figure(figsize=(10.0, 7.1), dpi=150, facecolor=bg_fig)
     FigureCanvasAgg(fig)
 
     gs = fig.add_gridspec(
         2,
         1,
-        height_ratios=[2.05, 1.25],
-        hspace=0.34,
+        height_ratios=[2.0, 1.38],
+        hspace=0.33,
         left=0.12,
         right=0.83,
         top=0.84,
-        bottom=0.09,
+        bottom=0.085,
     )
 
     ax_top = fig.add_subplot(gs[0], facecolor=bg_card)
@@ -1221,6 +1234,7 @@ def render_history_chart_png(target_name: str, report: dict) -> io.BytesIO:
         ("Gambling", cats["gamble"]),
         ("Stealing", cats["steal"]),
         ("Trivia", cats["trivia"]),
+        ("Player Gives", cats["give"]),
         ("Admin Gives", cats["admin_give"]),
     ]
     if cats["other"]["net"] != 0:
@@ -1410,13 +1424,29 @@ def format_history_caption_html(target_name: str, report: dict) -> str:
         trivia_detail = ""
     line_trivia = f"❓ <b>Trivia:</b> <code>{_fmt_signed(t['net'])} CXP</code>{trivia_detail}"
 
-    # 6. Admin Gives
+    # 6. Player Gives (/give, /gift, /donate, /send)
+    gv = cats["give"]
+    if gv["gained"] > 0 and gv["lost"] < 0:
+        give_detail = f" <i>(+{gv['gained']:,} received / {gv['lost']:,} given)</i>"
+    elif gv["gained"] > 0:
+        give_detail = (
+            f" <i>(+{gv['gained']:,} received • {gv['received_count']}x)</i>"
+        )
+    elif gv["lost"] < 0:
+        give_detail = (
+            f" <i>({gv['lost']:,} given • {gv['sent_count']}x)</i>"
+        )
+    else:
+        give_detail = ""
+    line_give = f"🎁 <b>Player Gives:</b> <code>{_fmt_signed(gv['net'])} CXP</code>{give_detail}"
+
+    # 7. Admin Gives (/admingive)
     a = cats["admin_give"]
     if a["gained"] > 0 and a["lost"] < 0:
         admin_detail = f" <i>(+{a['gained']:,} / {a['lost']:,})</i>"
     else:
         admin_detail = ""
-    line_admin = f"🎁 <b>Admin Gives:</b> <code>{_fmt_signed(a['net'])} CXP</code>{admin_detail}"
+    line_admin = f"👑 <b>Admin Gives:</b> <code>{_fmt_signed(a['net'])} CXP</code>{admin_detail}"
 
     extra_lines: list[str] = []
     if cats["other"]["net"] != 0:
@@ -1442,6 +1472,7 @@ def format_history_caption_html(target_name: str, report: dict) -> str:
         f"{line_gambling}\n"
         f"{line_stealing}\n"
         f"{line_trivia}\n"
+        f"{line_give}\n"
         f"{line_admin}"
         f"{extra_block}"
     )

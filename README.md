@@ -23,7 +23,8 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
      * *Lvl 30-39:* Exquisitely Symmetrical | *Lvl 40-49:* Supersymmetric
      * *Lvl 50-59:* Very Symmetrical | *Lvl 60+:* Pure Symmetry
 - **Leaderboards & Top 3 Podiums**: Renders a dark-mode Top 3 Podium graphic (with member avatars, crown, medals, CXP, and level titles) alongside the Top 10 list globally (`/leaderboard`, `/lb`, `/top`, `/ranks`) or by timeframe (`/lb day`, `week`, `month`).
-- **History & Charts**: Inspect detailed CXP balance charts, timeframe high/low peaks, and full source breakdowns across messages, reactions, gambling, stealing, trivia, and admin grants (`/history`, `/h`, `/hist`, `/chart`, `/pnl` with user & timeframe in any order).
+- **History & Charts**: Inspect detailed CXP balance charts, timeframe high/low peaks, and full source breakdowns across messages, reactions, gambling, stealing, trivia, player gifts/gives (sent & received), and admin grants (`/history`, `/h`, `/hist`, `/chart`, `/pnl` with user & timeframe in any order).
+- **Player Gifting & Admin Grants**: Members can transfer CXP from their own balance to other players with `/give` (`/gift`, `/donate`, `/send`), while admins can mint or deduct CXP via `/admingive` (`/admingift`, `/admindonate`, `/adminsend`).
 - **Contests**: Admins can use `/setcontest` to define a specific date range for special events, trackable via `/contest` (`/event`).
 - **Mini-Games & Trivia**: Users can use `/steal` (`/s`, `/rob`, `/yoink`, `/heist`) to steal up to 25-100 CXP (1-hour cooldown), `/gamble <amount>` (`/g`, `/bet`, `/slots`, `/spin`) to play the 5-line CXP slot machine, or DM `/question` (`/trivia`, `/quiz`, `/q`) to host CXP trivia questions in the group (`/answer` / `/ans` / `/guess` / `/a`, `/cancel` / `/abort`).
 

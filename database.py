@@ -1538,6 +1538,78 @@ class Database:
                     "thief_new_cxp": thief_new_cxp,
                 }
 
+    async def transfer_cxp(
+        self,
+        sender_id: int,
+        recipient_id: int,
+        amount: int | None = None,
+        *,
+        transfer_all: bool = False,
+        reference_id: int | None = None,
+    ) -> dict:
+        if not self.pool:
+            return {"ok": False, "reason": "db_unavailable"}
+        if sender_id == recipient_id:
+            return {"ok": False, "reason": "self_transfer"}
+        if not transfer_all and (amount is None or amount < 1):
+            return {"ok": False, "reason": "invalid_amount"}
+
+        utc_date = datetime.now(timezone.utc).date()
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for uid in sorted({sender_id, recipient_id}):
+                    await conn.execute(
+                        "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                        uid,
+                    )
+
+                rows_by_id = {}
+                for uid in sorted({sender_id, recipient_id}):
+                    rows_by_id[uid] = await conn.fetchrow(
+                        "SELECT * FROM users WHERE user_id = $1 FOR UPDATE", uid
+                    )
+
+                sender_row = rows_by_id.get(sender_id)
+                sender_old_cxp = (sender_row["cxp"] or 0) if sender_row else 0
+                actual_amount = sender_old_cxp if transfer_all else int(amount)
+
+                if actual_amount < 1 or sender_old_cxp < actual_amount:
+                    return {
+                        "ok": False,
+                        "reason": "insufficient_cxp",
+                        "current_cxp": sender_old_cxp,
+                    }
+
+                _, sender_new_cxp = await self._adjust_cxp_in_tx(
+                    conn,
+                    sender_id,
+                    -actual_amount,
+                    utc_date,
+                    category="give",
+                    sub_type="sent",
+                    counterparty_id=recipient_id,
+                    reference_id=reference_id,
+                )
+                recipient_old_cxp, recipient_new_cxp = await self._adjust_cxp_in_tx(
+                    conn,
+                    recipient_id,
+                    actual_amount,
+                    utc_date,
+                    category="give",
+                    sub_type="received",
+                    counterparty_id=sender_id,
+                    reference_id=reference_id,
+                )
+
+                return {
+                    "ok": True,
+                    "amount": actual_amount,
+                    "sender_old_cxp": sender_old_cxp,
+                    "sender_new_cxp": sender_new_cxp,
+                    "recipient_old_cxp": recipient_old_cxp,
+                    "recipient_new_cxp": recipient_new_cxp,
+                }
+
     async def get_user_cxp_history_data(self, user_id: int) -> dict | None:
         if not self.pool:
             return None
