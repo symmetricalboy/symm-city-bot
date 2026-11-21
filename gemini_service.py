@@ -76,7 +76,10 @@ def get_gemini_client() -> genai.Client | None:
 
 
 def get_video_gemini_client() -> genai.Client | None:
-    """Return a cached `genai.Client` with an extended 420s HTTP timeout for Gemini Omni 1.2 Flash video generation."""
+    """
+    Return a cached `genai.Client` configured with `api_version='v1beta'` and an extended
+    420s HTTP timeout for `gemini-omni-1.2-flash` video generation and Files API operations.
+    """
     global _video_client, _video_client_key
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not api_key:
@@ -85,7 +88,10 @@ def get_video_gemini_client() -> genai.Client | None:
         try:
             _video_client = genai.Client(
                 api_key=api_key,
-                http_options=types.HttpOptions(timeout=420_000),
+                http_options=types.HttpOptions(
+                    api_version="v1beta",
+                    timeout=420_000,
+                ),
             )
             _video_client_key = api_key
         except Exception as e:

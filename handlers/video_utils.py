@@ -173,7 +173,7 @@ def finalize_telegram_mp4_sync(
         if strip_audio:
             cmd.append("-an")
         else:
-            cmd.extend(["-c:a", "copy"])
+            cmd.extend(["-c:a", "aac", "-b:a", "160k"])
         cmd.extend(["-movflags", "+faststart", out_path])
 
         proc = subprocess.run(
