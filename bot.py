@@ -19,6 +19,7 @@ from telegram.ext import (
     MessageReactionHandler,
 )
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 
 from database import db
 from memory_engine import memory_engine
@@ -207,10 +208,29 @@ async def post_shutdown(application: Application) -> None:
 
 def main() -> None:
     """Start the bot."""
+    # Dedicated HTTPX pools + concurrent_updates so slow AI / image tasks never block fast commands
+    bot_request = HTTPXRequest(
+        connection_pool_size=32,
+        read_timeout=30.0,
+        write_timeout=40.0,
+        connect_timeout=10.0,
+        pool_timeout=10.0,
+    )
+    updates_request = HTTPXRequest(
+        connection_pool_size=4,
+        read_timeout=35.0,
+        write_timeout=15.0,
+        connect_timeout=10.0,
+        pool_timeout=10.0,
+    )
+
     # Create the Application
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .request(bot_request)
+        .get_updates_request(updates_request)
+        .concurrent_updates(16)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -334,9 +354,9 @@ def main() -> None:
 
     # AI Chat (/ask, /?, aliases, @bot mentions, and direct replies to anything the bot says)
     application.add_handler(
-        CommandHandler(["ask", "ai", "chat", "symm", "bot"], ask_cmd)
+        CommandHandler(["ask", "ai", "chat", "symm", "bot"], ask_cmd, block=False)
     )
-    application.add_handler(MessageHandler(ask_qmark_filter, ask_cmd))
+    application.add_handler(MessageHandler(ask_qmark_filter, ask_cmd, block=False))
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS
@@ -349,6 +369,7 @@ def main() -> None:
             & ~ask_qmark_filter
             & ~filters.StatusUpdate.ALL,
             reply_to_bot_cmd,
+            block=False,
         )
     )
 
@@ -461,7 +482,10 @@ def main() -> None:
             )
             # Clear webhook to ensure polling works
             await application.bot.delete_webhook(drop_pending_updates=True)
-            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            await application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                bootstrap_retries=-1,
+            )
 
         # Run the FastAPI server concurrently
         config = uvicorn.Config(

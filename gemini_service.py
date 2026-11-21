@@ -6,6 +6,7 @@ Uses:
   - `gemini-embedding-2` (`768` dimensions) via `client.aio.models.embed_content`
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -54,12 +55,63 @@ def get_gemini_client() -> genai.Client | None:
         return None
     if _client is None or _client_key != api_key:
         try:
-            _client = genai.Client(api_key=api_key)
+            _client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=90_000),
+            )
             _client_key = api_key
         except Exception as e:
             logger.error("Failed to initialize Gemini client: %s", e)
             _client = None
     return _client
+
+
+def reset_gemini_client():
+    """Discard cached `genai.Client` so subsequent calls establish fresh HTTP connections."""
+    global _client
+    _client = None
+
+
+async def _create_interaction_with_timeout(
+    kwargs: dict[str, Any], *, timeout_sec: float = 75.0
+) -> Any:
+    """
+    Call `client.aio.interactions.create(**kwargs)` with an explicit asyncio deadline.
+    `google-genai`'s async Interactions client defaults to `Timeout(timeout=None)`,
+    so enforcing `asyncio.wait_for` prevents stalled sockets from ever hanging indefinitely.
+    """
+    for attempt in range(2):
+        client = get_gemini_client()
+        if not client:
+            raise RuntimeError("GEMINI_API_KEY is not configured.")
+        try:
+            return await asyncio.wait_for(
+                client.aio.interactions.create(**kwargs),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Gemini interactions.create(%s) timed out after %.1fs (attempt %d/2); resetting client pool.",
+                kwargs.get("model"),
+                timeout_sec,
+                attempt + 1,
+            )
+            reset_gemini_client()
+            if attempt == 1:
+                raise
+        except Exception as err:
+            # Retry once on transient connection/pool transport errors
+            err_name = type(err).__name__.lower()
+            if attempt == 0 and any(
+                k in err_name for k in ("connect", "pool", "protocol", "readerror", "remoteprotocol")
+            ):
+                logger.warning(
+                    "Transient transport error on Gemini (%s); resetting client and retrying once.",
+                    err,
+                )
+                reset_gemini_client()
+                continue
+            raise
 
 
 def extract_interaction_text(interaction: Any) -> str:
@@ -133,7 +185,7 @@ async def generate_text(
     if system_instruction:
         kwargs["system_instruction"] = system_instruction
 
-    interaction = await client.aio.interactions.create(**kwargs)
+    interaction = await _create_interaction_with_timeout(kwargs, timeout_sec=45.0)
     return extract_interaction_text(interaction)
 
 
@@ -145,10 +197,6 @@ async def describe_images_with_neon(
     model: str = GEMINI_CHAT_MODEL,
 ) -> str:
     """Inspect one or more images with `gemini-4-neon` and answer `prompt`."""
-    client = get_gemini_client()
-    if not client:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for img_bytes, mime_type in images[:6]:
         content.append(
@@ -159,11 +207,14 @@ async def describe_images_with_neon(
             }
         )
 
-    interaction = await client.aio.interactions.create(
-        model=model,
-        input=[{"type": "user_input", "content": content}],
-        store=False,
-        generation_config={"thinking_level": thinking_level},
+    interaction = await _create_interaction_with_timeout(
+        {
+            "model": model,
+            "input": [{"type": "user_input", "content": content}],
+            "store": False,
+            "generation_config": {"thinking_level": thinking_level},
+        },
+        timeout_sec=60.0,
     )
     return extract_interaction_text(interaction)
 
@@ -179,10 +230,6 @@ async def generate_or_edit_image_bytes(
     Generate a new image or edit/combine up to 14 reference images using
     `gemini-nano-banana-2.1` via the GA Interactions API.
     """
-    client = get_gemini_client()
-    if not client:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-
     content_blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for img_bytes, mime_type in (reference_images or [])[:14]:
         content_blocks.append(
@@ -204,7 +251,7 @@ async def generate_or_edit_image_bytes(
             "aspect_ratio": aspect_ratio,
         }
 
-    interaction = await client.aio.interactions.create(**kwargs)
+    interaction = await _create_interaction_with_timeout(kwargs, timeout_sec=90.0)
     img_bytes, img_mime = extract_interaction_image(interaction)
     model_text = extract_interaction_text(interaction)
     return {
@@ -223,10 +270,6 @@ async def generate_json(
     model: str = GEMINI_CHAT_MODEL,
 ) -> Any:
     """Generate schema-constrained structured JSON asynchronously with `gemini-4-neon`."""
-    client = get_gemini_client()
-    if not client:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-
     kwargs: dict[str, Any] = {
         "model": model,
         "input": prompt,
@@ -243,7 +286,7 @@ async def generate_json(
     if system_instruction:
         kwargs["system_instruction"] = system_instruction
 
-    interaction = await client.aio.interactions.create(**kwargs)
+    interaction = await _create_interaction_with_timeout(kwargs, timeout_sec=75.0)
     raw_text = extract_interaction_text(interaction)
     if not raw_text:
         return None
@@ -307,7 +350,7 @@ async def run_agentic_interaction(
         if tools and _round < max_tool_rounds:
             req_kwargs["tools"] = tools
 
-        interaction = await client.aio.interactions.create(**req_kwargs)
+        interaction = await _create_interaction_with_timeout(req_kwargs, timeout_sec=75.0)
         steps = getattr(interaction, "steps", None) or []
 
         function_calls = [s for s in steps if getattr(s, "type", None) == "function_call"]
@@ -370,10 +413,13 @@ async def embed_texts(
         return [None] * len(texts)
 
     try:
-        resp = await client.aio.models.embed_content(
-            model=model,
-            contents=texts,
-            config=types.EmbedContentConfig(output_dimensionality=dimensionality),
+        resp = await asyncio.wait_for(
+            client.aio.models.embed_content(
+                model=model,
+                contents=texts,
+                config=types.EmbedContentConfig(output_dimensionality=dimensionality),
+            ),
+            timeout=20.0,
         )
         embeddings = getattr(resp, "embeddings", None) or []
         results: list[list[float] | None] = []

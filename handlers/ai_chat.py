@@ -1,3 +1,4 @@
+import asyncio
 import html
 import io
 import logging
@@ -42,39 +43,66 @@ async def _delete_messages_job(context: CallbackContext):
             logger.warning("Failed to auto-delete message %s: %s", msg_id, e)
 
 
-async def _download_telegram_image(bot, file_id: str | None) -> tuple[bytes, str] | None:
-    """Download a Telegram image `file_id` and normalize to `(bytes, mime_type)`."""
-    if not bot or not file_id:
-        return None
-    try:
-        tg_file = await bot.get_file(file_id)
-        raw = bytes(await tg_file.download_as_bytearray())
-        if not raw:
-            return None
+def _normalize_image_sync(raw: bytes) -> tuple[bytes, str]:
+    img = Image.open(io.BytesIO(raw))
+    fmt = (img.format or "PNG").upper()
+    max_dim = max(img.size)
+    if fmt in ("JPEG", "PNG", "WEBP") and max_dim <= 2048 and len(raw) <= 4_000_000:
+        mime_map = {
+            "JPEG": "image/jpeg",
+            "PNG": "image/png",
+            "WEBP": "image/webp",
+        }
+        return raw, mime_map[fmt]
 
-        # Inspect format & downscale oversized images (>2048px) for fast API roundtrips
+    if max_dim > 2048:
+        scale = 2048 / max_dim
+        new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+        img = img.resize(new_size, resample=Image.Resampling.LANCZOS)
+
+    out = io.BytesIO()
+    if img.mode in ("RGBA", "LA", "P") and len(raw) <= 2_500_000:
+        img.convert("RGBA").save(out, format="PNG")
+        return out.getvalue(), "image/png"
+    img.convert("RGB").save(out, format="JPEG", quality=92)
+    return out.getvalue(), "image/jpeg"
+
+
+def _prepare_telegram_photo_sync(raw: bytes, mime: str) -> tuple[bytes, str]:
+    """Ensure generated image fits comfortably within Telegram's 10MB / dimension limits and uploads fast."""
+    try:
         img = Image.open(io.BytesIO(raw))
-        fmt = (img.format or "PNG").upper()
         max_dim = max(img.size)
-        if fmt in ("JPEG", "PNG", "WEBP") and max_dim <= 2048:
-            mime_map = {
-                "JPEG": "image/jpeg",
-                "PNG": "image/png",
-                "WEBP": "image/webp",
-            }
-            return raw, mime_map[fmt]
+        if max_dim <= 2048 and len(raw) <= 3_500_000:
+            ext = "jpg" if "jpeg" in (mime or "").lower() else "png"
+            return raw, f"symm_image.{ext}"
 
         if max_dim > 2048:
             scale = 2048 / max_dim
-            new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
-            img = img.resize(new_size, resample=Image.Resampling.LANCZOS)
-
+            img = img.resize(
+                (int(img.size[0] * scale), int(img.size[1] * scale)),
+                resample=Image.Resampling.LANCZOS,
+            )
         out = io.BytesIO()
-        if img.mode in ("RGBA", "LA", "P"):
-            img.convert("RGBA").save(out, format="PNG")
-            return out.getvalue(), "image/png"
-        img.convert("RGB").save(out, format="JPEG", quality=92)
-        return out.getvalue(), "image/jpeg"
+        img.convert("RGB").save(out, format="JPEG", quality=93, optimize=True)
+        return out.getvalue(), "symm_image.jpg"
+    except Exception:
+        ext = "jpg" if "jpeg" in (mime or "").lower() else "png"
+        return raw, f"symm_image.{ext}"
+
+
+async def _download_telegram_image(bot, file_id: str | None) -> tuple[bytes, str] | None:
+    """Download a Telegram image `file_id` with bounded timeout and normalize off the event loop."""
+    if not bot or not file_id:
+        return None
+    try:
+        tg_file = await asyncio.wait_for(bot.get_file(file_id), timeout=12.0)
+        raw = bytes(
+            await asyncio.wait_for(tg_file.download_as_bytearray(), timeout=20.0)
+        )
+        if not raw:
+            return None
+        return await asyncio.to_thread(_normalize_image_sync, raw)
     except Exception as e:
         logger.warning("Failed downloading Telegram image %s: %s", file_id, e)
         return None
@@ -231,22 +259,32 @@ async def _run_ask_flow(
                 return None
             return await _download_telegram_image(context.bot, fid)
 
-        ai_res = await memory_engine.answer_ask_query(
-            chat_id=chat_id,
-            asker_id=asker_id,
-            asker_name=asker_name,
-            asker_username=asker_username,
-            question=question,
-            reply_context=reply_ctx,
-            attached_images=attached_images if attached_images else None,
-            fetch_message_image=_fetch_chat_msg_image,
+        ai_res = await asyncio.wait_for(
+            memory_engine.answer_ask_query(
+                chat_id=chat_id,
+                asker_id=asker_id,
+                asker_name=asker_name,
+                asker_username=asker_username,
+                question=question,
+                reply_context=reply_ctx,
+                attached_images=attached_images if attached_images else None,
+                fetch_message_image=_fetch_chat_msg_image,
+            ),
+            timeout=165.0,
         )
+
+        if typing_job:
+            typing_job.schedule_removal()
+            typing_job = None
 
         answer_text = (ai_res.get("text") or "").strip()
         gen_img_bytes: bytes | None = ai_res.get("image_bytes")
         gen_img_mime: str = ai_res.get("image_mime") or "image/png"
 
         if gen_img_bytes:
+            upload_bytes, fname = await asyncio.to_thread(
+                _prepare_telegram_photo_sync, gen_img_bytes, gen_img_mime
+            )
             try:
                 await context.bot.send_chat_action(
                     chat_id=chat_id,
@@ -256,15 +294,12 @@ async def _run_ask_flow(
             except Exception:
                 pass
 
-            ext = "jpg" if "jpeg" in gen_img_mime.lower() else "png"
-            fname = f"symm_image.{ext}"
-
             if len(answer_text) <= MessageLimit.CAPTION_LENGTH:
                 try:
                     sent_msg = await context.bot.send_photo(
                         chat_id=chat_id,
                         message_thread_id=thread_id,
-                        photo=io.BytesIO(gen_img_bytes),
+                        photo=io.BytesIO(upload_bytes),
                         filename=fname,
                         caption=answer_text or None,
                         parse_mode=ParseMode.HTML if answer_text else None,
@@ -276,7 +311,7 @@ async def _run_ask_flow(
                     sent_msg = await context.bot.send_photo(
                         chat_id=chat_id,
                         message_thread_id=thread_id,
-                        photo=io.BytesIO(gen_img_bytes),
+                        photo=io.BytesIO(upload_bytes),
                         filename=fname,
                         caption=plain_cap[: MessageLimit.CAPTION_LENGTH] or None,
                         reply_to_message_id=update.message.message_id,
@@ -285,7 +320,7 @@ async def _run_ask_flow(
                 sent_msg = await context.bot.send_photo(
                     chat_id=chat_id,
                     message_thread_id=thread_id,
-                    photo=io.BytesIO(gen_img_bytes),
+                    photo=io.BytesIO(upload_bytes),
                     filename=fname,
                     reply_to_message_id=update.message.message_id,
                 )
@@ -373,6 +408,14 @@ async def _run_ask_flow(
         except Exception as log_err:
             logger.warning("Failed to archive /ask exchange: %s", log_err)
 
+    except asyncio.TimeoutError:
+        logger.warning("Timed out handling AI chat request for chat %s", chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text="⏳ That request timed out waiting on the AI model — please try again!",
+            reply_to_message_id=update.message.message_id,
+        )
     except Exception as e:
         logger.error("Error handling AI chat response: %s", e, exc_info=True)
         await context.bot.send_message(
