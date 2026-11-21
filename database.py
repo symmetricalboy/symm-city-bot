@@ -178,10 +178,13 @@ class Database:
                     reply_to_message_id BIGINT,
                     content TEXT NOT NULL,
                     media_type VARCHAR(64),
+                    media_file_id TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     memory_digested BOOLEAN NOT NULL DEFAULT FALSE,
                     PRIMARY KEY (chat_id, message_id)
                 );
+
+                ALTER TABLE group_chat_messages ADD COLUMN IF NOT EXISTS media_file_id TEXT;
 
                 CREATE INDEX IF NOT EXISTS idx_gcm_chat_created_desc
                     ON group_chat_messages (chat_id, created_at DESC, message_id DESC);
@@ -1601,6 +1604,7 @@ class Database:
         reply_to_message_id: int | None = None,
         thread_id: int | None = None,
         media_type: str | None = None,
+        media_file_id: str | None = None,
         created_at: datetime | None = None,
         memory_digested: bool = False,
     ):
@@ -1614,19 +1618,22 @@ class Database:
         clean_name = (sender_name or "")[:255] or None
         clean_uname = (sender_username or "").lstrip("@")[:255] or None
         clean_media = (media_type or "")[:64] or None
+        clean_fid = (media_file_id or "").strip() or None
 
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO group_chat_messages (
                     chat_id, message_id, thread_id, user_id, sender_name, sender_username,
-                    is_bot, reply_to_message_id, content, media_type, created_at, memory_digested
+                    is_bot, reply_to_message_id, content, media_type, media_file_id, created_at, memory_digested
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (chat_id, message_id) DO UPDATE
                 SET content = EXCLUDED.content,
                     sender_name = COALESCE(EXCLUDED.sender_name, group_chat_messages.sender_name),
-                    sender_username = COALESCE(EXCLUDED.sender_username, group_chat_messages.sender_username)
+                    sender_username = COALESCE(EXCLUDED.sender_username, group_chat_messages.sender_username),
+                    media_type = COALESCE(EXCLUDED.media_type, group_chat_messages.media_type),
+                    media_file_id = COALESCE(EXCLUDED.media_file_id, group_chat_messages.media_file_id)
                 """,
                 chat_id,
                 message_id,
@@ -1638,9 +1645,52 @@ class Database:
                 reply_to_message_id,
                 content,
                 clean_media,
+                clean_fid,
                 created_at,
                 memory_digested,
             )
+
+    async def get_message_media_file_ids(
+        self, chat_id: int, message_ids: list[int]
+    ) -> dict[int, str]:
+        """Look up stored Telegram `media_file_id`s for specific `message_id`s in `chat_id`."""
+        if not self.pool or not message_ids:
+            return {}
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT message_id, media_file_id
+                FROM group_chat_messages
+                WHERE chat_id = $1
+                  AND message_id = ANY($2::bigint[])
+                  AND media_file_id IS NOT NULL
+                """,
+                chat_id,
+                [int(m) for m in message_ids],
+            )
+            return {int(r["message_id"]): str(r["media_file_id"]) for r in rows}
+
+    async def get_latest_group_image_file_id(
+        self, chat_id: int
+    ) -> tuple[int, str] | None:
+        """Return `(message_id, media_file_id)` for the most recent image message in `chat_id`."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT message_id, media_file_id
+                FROM group_chat_messages
+                WHERE chat_id = $1
+                  AND media_file_id IS NOT NULL
+                ORDER BY created_at DESC, message_id DESC
+                LIMIT 1
+                """,
+                chat_id,
+            )
+            if row and row["media_file_id"]:
+                return int(row["message_id"]), str(row["media_file_id"])
+            return None
 
     async def get_recent_group_messages(
         self,
@@ -1662,7 +1712,7 @@ class Database:
                 rows = await conn.fetch(
                     """
                     SELECT message_id, thread_id, user_id, sender_name, sender_username,
-                           is_bot, reply_to_message_id, content, media_type, created_at
+                           is_bot, reply_to_message_id, content, media_type, media_file_id, created_at
                     FROM group_chat_messages
                     WHERE chat_id = $1
                       AND NOT (
@@ -1694,7 +1744,7 @@ class Database:
                 rows = await conn.fetch(
                     """
                     SELECT message_id, thread_id, user_id, sender_name, sender_username,
-                           is_bot, reply_to_message_id, content, media_type, created_at
+                           is_bot, reply_to_message_id, content, media_type, media_file_id, created_at
                     FROM group_chat_messages
                     WHERE chat_id = $1
                     ORDER BY created_at DESC, message_id DESC

@@ -1,3 +1,4 @@
+import html
 import logging
 import os
 import math
@@ -6,12 +7,14 @@ import asyncio
 import calendar
 from datetime import datetime, timedelta, timezone
 from telegram import Update, ChatPermissions, error
+from telegram.constants import ChatAction, MessageLimit, ParseMode
 from telegram.ext import CallbackContext
 import httpx
 from telegram.helpers import escape_markdown
 
 from database import db
 from handlers.common import resolve_username, is_user_admin
+from handlers.podium import fetch_user_avatar_bytes, render_podium_png
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +355,26 @@ def _extract_message_content_and_media(
     return content, media_type, reply_to_id
 
 
+def extract_image_file_id(message) -> str | None:
+    """Extract a downloadable Telegram `file_id` if `message` contains a photo, image file, or static sticker."""
+    if not message:
+        return None
+    photos = getattr(message, "photo", None)
+    if photos:
+        return getattr(photos[-1], "file_id", None)
+    doc = getattr(message, "document", None)
+    if doc and (getattr(doc, "mime_type", None) or "").lower().startswith("image/"):
+        return getattr(doc, "file_id", None)
+    sticker = getattr(message, "sticker", None)
+    if (
+        sticker
+        and not getattr(sticker, "is_animated", False)
+        and not getattr(sticker, "is_video", False)
+    ):
+        return getattr(sticker, "file_id", None)
+    return None
+
+
 async def _archive_group_message_only(
     chat_id: int,
     msg_id: int,
@@ -363,6 +386,7 @@ async def _archive_group_message_only(
     reply_to_message_id: int | None = None,
     thread_id: int | None = None,
     media_type: str | None = None,
+    media_file_id: str | None = None,
     created_at: datetime | None = None,
 ):
     """Record a rate-limited message in `messages` and `group_chat_messages` without awarding CXP."""
@@ -379,6 +403,7 @@ async def _archive_group_message_only(
             reply_to_message_id=reply_to_message_id,
             thread_id=thread_id,
             media_type=media_type,
+            media_file_id=media_file_id,
             created_at=created_at,
         )
         try:
@@ -399,6 +424,7 @@ async def _process_db_message_and_cxp(
     reply_to_message_id: int | None = None,
     thread_id: int | None = None,
     media_type: str | None = None,
+    media_file_id: str | None = None,
     created_at: datetime | None = None,
 ):
     """Background task to save the message, archive for AI memory, and award CXP without blocking the chat."""
@@ -426,6 +452,7 @@ async def _process_db_message_and_cxp(
             reply_to_message_id=reply_to_message_id,
             thread_id=thread_id,
             media_type=media_type,
+            media_file_id=media_file_id,
             created_at=created_at,
         )
         try:
@@ -543,6 +570,7 @@ async def track_message_activity(update: Update, context: CallbackContext):
     content, media_type, reply_to_id = _extract_message_content_and_media(
         update.message, is_forum=is_forum
     )
+    media_file_id = extract_image_file_id(update.message)
     msg_thread_id = getattr(update.message, "message_thread_id", None)
     msg_date = getattr(update.message, "date", None)
 
@@ -573,6 +601,7 @@ async def track_message_activity(update: Update, context: CallbackContext):
                 reply_to_message_id=reply_to_id,
                 thread_id=msg_thread_id,
                 media_type=media_type,
+                media_file_id=media_file_id,
                 created_at=msg_date,
             )
         )
@@ -592,6 +621,7 @@ async def track_message_activity(update: Update, context: CallbackContext):
             reply_to_message_id=reply_to_id,
             thread_id=msg_thread_id,
             media_type=media_type,
+            media_file_id=media_file_id,
             created_at=msg_date,
         )
     )
@@ -942,34 +972,50 @@ def parse_leaderboard_args(args, config):
 
 
 async def leaderboard_cmd(update: Update, context: CallbackContext):
-    """Handler for /leaderboard. Shows top 10, skipping admins."""
+    """Handler for /leaderboard (/lb). Renders a Top 3 Podium image + Top 10 caption."""
+    if not update.effective_chat or not update.message:
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id
     config = await db.get_config()
 
-
     start_date, end_date, title = parse_leaderboard_args(context.args, config)
+    is_timeframe = bool(start_date and end_date)
 
-    actual_top_10 = await db.get_leaderboard(limit=10, start_date=start_date, end_date=end_date)
+    actual_top_10 = await db.get_leaderboard(
+        limit=10, start_date=start_date, end_date=end_date
+    )
     if not actual_top_10:
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            message_thread_id=update.message.message_thread_id,
+            chat_id=chat_id,
+            message_thread_id=thread_id,
             text=f"The {title.lower()} is currently empty!",
         )
         return
 
-    msg = f"🏆 **{title} (Top 10)** 🏆\n\n"
+    try:
+        await context.bot.send_chat_action(
+            chat_id=chat_id,
+            action=ChatAction.UPLOAD_PHOTO,
+            message_thread_id=thread_id if getattr(update.effective_chat, "is_forum", False) else None,
+        )
+    except Exception:
+        pass
 
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    resolved_rows: list[dict] = []
+
     for i, row in enumerate(actual_top_10):
         u_id = row.get("user_id")
-        cxp = row.get("cxp", 0)
-        total_cxp = row.get("total_cxp", cxp)
+        cxp = int(row.get("cxp") or 0)
+        total_cxp = int(row.get("total_cxp", cxp) or 0)
         level = calculate_level(total_cxp)
-        medal = medals[i] if i < len(medals) else f"#{i+1}"
+        level_title = _get_member_tag_string(level)
 
         name = row.get("display_name")
+        username = row.get("username")
         if not name:
-            username = row.get("username")
             if username:
                 name = f"@{username}"
             else:
@@ -979,15 +1025,83 @@ async def leaderboard_cmd(update: Update, context: CallbackContext):
                 except Exception:
                     name = f"User {u_id}"
 
-        safe_name = escape_markdown(name, version=1)
-        msg += f"{medal} **{safe_name}** — Level {level} ({cxp:,} CXP)\n"
+        resolved_rows.append(
+            {
+                "rank": i + 1,
+                "user_id": u_id,
+                "name": name,
+                "username": username,
+                "cxp": cxp,
+                "total_cxp": total_cxp,
+                "level": level,
+                "level_title": level_title,
+                "medal": medals[i] if i < len(medals) else f"#{i + 1}",
+            }
+        )
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        message_thread_id=update.message.message_thread_id,
-        text=msg,
-        parse_mode="Markdown",
+    # Fetch Top 3 avatars concurrently (with 15-min in-memory cache)
+    top3 = resolved_rows[:3]
+    avatars = await asyncio.gather(
+        *(fetch_user_avatar_bytes(context.bot, r["user_id"]) for r in top3),
+        return_exceptions=True,
     )
+    podium_entries = []
+    for r, av in zip(top3, avatars):
+        entry = dict(r)
+        entry["avatar_bytes"] = av if isinstance(av, (bytes, bytearray)) else None
+        podium_entries.append(entry)
+
+    subtitle_detail = None
+    if is_timeframe and start_date and end_date:
+        if start_date == end_date:
+            subtitle_detail = start_date.strftime("%b %d, %Y")
+        else:
+            subtitle_detail = (
+                f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
+            )
+
+    podium_buf = await asyncio.to_thread(
+        render_podium_png,
+        title,
+        podium_entries,
+        is_timeframe=is_timeframe,
+        subtitle_detail=subtitle_detail,
+    )
+
+    lines = [f"🏆 <b>{html.escape(title)} (Top 10)</b> 🏆\n"]
+    for r in resolved_rows:
+        safe_name = html.escape(r["name"])
+        sign_prefix = "+" if (is_timeframe and r["cxp"] > 0) else ""
+        lines.append(
+            f"{r['medal']} <b>{safe_name}</b> — Level {r['level']} "
+            f"(<code>{sign_prefix}{r['cxp']:,} CXP</code>)"
+        )
+    caption_html = "\n".join(lines)
+
+    if len(caption_html) <= MessageLimit.CAPTION_LENGTH:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            photo=podium_buf,
+            filename="leaderboard_podium.png",
+            caption=caption_html,
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            photo=podium_buf,
+            filename="leaderboard_podium.png",
+            caption=f"🏆 <b>{html.escape(title)}</b> 🏆",
+            parse_mode=ParseMode.HTML,
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=caption_html,
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def get_id_cmd(update: Update, context: CallbackContext):

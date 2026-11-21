@@ -2,7 +2,7 @@
 
 [@symmcitybot](https://t.me/symmcitybot) | [symm.city](https://symm.city)
 
-A powerful, modular Telegram bot designed for the **symm.city** community. Built with Python, `python-telegram-bot` (v22+), FastAPI, PostgreSQL (`asyncpg` + `pgvector`), and Google Gemini (`gemini-4-neon` + `gemini-embedding-2`).
+A powerful, modular Telegram bot designed for the **symm.city** community. Built with Python, `python-telegram-bot` (v22+), FastAPI, PostgreSQL (`asyncpg` + `pgvector`), and Google Gemini (`gemini-4-neon`, `gemini-nano-banana-2.1`, & `gemini-embedding-2`).
 
 ---
 
@@ -22,13 +22,14 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
      * *Lvl 10-19:* Rotational Harmony | *Lvl 20-29:* Crystalline Order
      * *Lvl 30-39:* Exquisitely Symmetrical | *Lvl 40-49:* Supersymmetric
      * *Lvl 50-59:* Very Symmetrical | *Lvl 60+:* Pure Symmetry
-- **Leaderboards**: View the top active members globally (`/leaderboard`, `/lb`, `/top`, `/ranks`) or filter by timeframe (`/lb day`, `week`, `month`).
+- **Leaderboards & Top 3 Podiums**: Renders a dark-mode Top 3 Podium graphic (with member avatars, crown, medals, CXP, and level titles) alongside the Top 10 list globally (`/leaderboard`, `/lb`, `/top`, `/ranks`) or by timeframe (`/lb day`, `week`, `month`).
 - **History & Charts**: Inspect detailed CXP balance charts, timeframe high/low peaks, and full source breakdowns across messages, reactions, gambling, stealing, trivia, and admin grants (`/history`, `/h`, `/hist`, `/chart`, `/pnl` with user & timeframe in any order).
 - **Contests**: Admins can use `/setcontest` to define a specific date range for special events, trackable via `/contest` (`/event`).
 - **Mini-Games & Trivia**: Users can use `/steal` (`/s`, `/rob`, `/yoink`, `/heist`) to steal up to 25-100 CXP (1-hour cooldown), `/gamble <amount>` (`/g`, `/bet`, `/slots`, `/spin`) to play the 5-line CXP slot machine, or DM `/question` (`/trivia`, `/quiz`, `/q`) to host CXP trivia questions in the group (`/answer` / `/ans` / `/guess` / `/a`, `/cancel` / `/abort`).
 
-### 🤖 Continual-Memory AI Assistant (`/ask`, `/?`, & Direct Replies)
-- **Seamless Reply Conversations**: Members can use `/ask <question>` (or shortcuts `/?`, `/ai`, `/chat`, `/symm`, `/bot`) or simply reply directly to *anything* the bot says (AI answers, slot spins, `/history` charts, translations, stats) to chat naturally.
+### 🤖 Continual-Memory AI & Image Studio (`/ask`, `/?`, & Direct Replies)
+- **Seamless Reply Conversations**: Members can use `/ask <prompt>` (or shortcuts `/?`, `/ai`, `/chat`, `/symm`, `/bot`), mention `@symmcitybot`, or simply reply directly to *anything* the bot says (AI answers, generated images, slot spins, `/history` charts, `/lb` podiums, translations) to chat naturally.
+- **Contextual Image Generation & Editing (`gemini-nano-banana-2.1`)**: No separate image commands needed — describe a scene to generate an image, or attach/reply/refer to any photo in chat to edit, restyle, combine, or inspect it across multiple turns.
 - **250-Message Floating Context Window**: Injects the ~250 most recent conversational messages from the group chat so `/ask` understands ongoing threads, jokes, and multi-turn replies.
 - **Continuous Long-Term Memory & Member Profiles**: Continuously digests group chat history into PostgreSQL (`group_chat_messages`, `user_memory_profiles`, `memory_documents`, `memory_keyword_index`, and `768`-dim `pgvector` embeddings via `gemini-embedding-2`), learning about members, projects, gear, and community lore over time.
 - **Agentic Archive Search**: Uses `gemini-4-neon` via the Interactions API with live database tools (`search_chat_history`, `get_member_memories`, `remember_fact`) plus core knowledge of symm's projects and community rules.

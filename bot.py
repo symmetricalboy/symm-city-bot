@@ -332,7 +332,7 @@ def main() -> None:
     application.add_handler(CommandHandler("kick", kick_cmd))
     application.add_handler(CommandHandler("ban", ban_cmd))
 
-    # AI Chat (/ask, /?, aliases, and direct replies to anything the bot says in group chats)
+    # AI Chat (/ask, /?, aliases, @bot mentions, and direct replies to anything the bot says)
     application.add_handler(
         CommandHandler(["ask", "ai", "chat", "symm", "bot"], ask_cmd)
     )
@@ -340,7 +340,11 @@ def main() -> None:
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS
-            & filters.REPLY
+            & (
+                filters.REPLY
+                | filters.Entity("mention")
+                | filters.CaptionEntity("mention")
+            )
             & ~filters.COMMAND
             & ~ask_qmark_filter
             & ~filters.StatusUpdate.ALL,

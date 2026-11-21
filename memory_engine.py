@@ -11,13 +11,15 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ai_library import get_relevant_context
 from database import db
 from gemini_service import (
+    describe_images_with_neon,
     embed_texts,
     generate_json,
+    generate_or_edit_image_bytes,
     get_gemini_client,
     run_agentic_interaction,
 )
@@ -371,6 +373,73 @@ ASK_TOOLS: list[dict[str, Any]] = [
             ],
         },
     },
+    {
+        "type": "function",
+        "name": "generate_or_edit_image",
+        "description": (
+            "Contextually generate a brand-new image from a description OR edit/remix/combine one or more "
+            "existing images using Nano Banana 2.1 (`gemini-nano-banana-2.1`). Call this whenever the user "
+            "asks to draw, create, render, visualize, meme-ify, edit, modify, restyle, swap, add/remove elements, "
+            "or transform an attached, replied-to, or recently posted image. Do NOT call this if the user is "
+            "merely asking a factual question about what is inside an attached image."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Rich, detailed visual prompt describing the image to generate, OR explicit editing "
+                        "instructions describing what to change, add, remove, or restyle in the reference image(s). "
+                        "Incorporate relevant member/community visual details from memory when appropriate."
+                    ),
+                },
+                "use_attached_or_replied_images": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true when editing, remixing, or referencing the image(s) attached to the current "
+                        "message or replied-to message; set false when creating a brand-new image from scratch."
+                    ),
+                },
+                "reference_message_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Optional message_id(s) marked `[img_msg_id=...]` in the floating chat window when the "
+                        "user refers to one or more earlier images posted in chat without directly replying to them."
+                    ),
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"],
+                    "description": "Optional output aspect ratio (omit when editing an existing image to preserve its framing unless requested).",
+                },
+            },
+            "required": ["prompt", "use_attached_or_replied_images"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "inspect_chat_image",
+        "description": (
+            "Visually inspect an earlier image from the floating chat window (`[img_msg_id=...]`) when a user "
+            "asks what is in a recent photo they did not directly attach or reply to."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "integer",
+                    "description": "The message_id of the image message from `[img_msg_id=...]` (omit to inspect the latest image in chat).",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "What to examine, read, or describe from the image.",
+                },
+            },
+            "required": ["question"],
+        },
+    },
 ]
 
 
@@ -424,6 +493,7 @@ def _format_floating_window(messages: list[dict]) -> str:
         mid = m.get("message_id")
         reply_id = m.get("reply_to_message_id")
         reply_tag = f" ->#{reply_id}" if reply_id else ""
+        img_tag = f" [img_msg_id={mid}]" if m.get("media_file_id") else ""
         bot_tag = "[BOT] " if m.get("is_bot") else ""
         sname = m.get("sender_name") or (
             f"@{m['sender_username']}" if m.get("sender_username") else f"User {m.get('user_id')}"
@@ -438,7 +508,7 @@ def _format_floating_window(messages: list[dict]) -> str:
         if len(text) > 420:
             text = text[:417] + "..."
         lines.append(
-            f"[{ts_str} #{mid}{reply_tag}] {bot_tag}{sname}{uname_part}: {text}"
+            f"[{ts_str} #{mid}{reply_tag}]{img_tag} {bot_tag}{sname}{uname_part}: {text}"
         )
     return "\n".join(lines)
 
@@ -751,14 +821,13 @@ class MemoryEngine:
         asker_username: str | None,
         question: str,
         reply_context: dict | None = None,
-    ) -> str:
+        attached_images: list[tuple[bytes, str]] | None = None,
+        fetch_message_image: Callable[[int], Awaitable[tuple[bytes, str] | None]] | None = None,
+    ) -> dict[str, Any]:
         """
-        Generate a context-rich, memory-grounded answer for `/ask` using `gemini-4-neon`,
-        injecting:
-          - 250-message floating group chat context window
-          - Learned user profiles & long-term memories (hybrid keyword + pgvector retrieval)
-          - Bluesky archive & symm.city core knowledge
-          - Live DB search & memory tools (`search_chat_history`, `get_member_memories`, `remember_fact`)
+        Generate a context-rich, memory-grounded answer (and optional generated/edited image)
+        using `gemini-4-neon` + `gemini-nano-banana-2.1`.
+        Returns `{"text": html_str, "image_bytes": bytes | None, "image_mime": str}`.
         """
         # Clean accidental literal "<question>" copied from /help examples
         clean_q = re.sub(r"^\s*<question>\s*[.:,-]?\s*", "", question.strip(), flags=re.IGNORECASE).strip()
@@ -1012,7 +1081,86 @@ class MemoryEngine:
                 )
                 return {"saved": bool(doc_id), "document_id": doc_id}
 
+            if fn_name == "generate_or_edit_image":
+                img_prompt = (fn_args.get("prompt") or "").strip()
+                if not img_prompt:
+                    return {"generated": False, "error": "Empty image prompt."}
+
+                use_direct = bool(fn_args.get("use_attached_or_replied_images"))
+                ref_msg_ids = fn_args.get("reference_message_ids") or []
+                aspect_ratio = fn_args.get("aspect_ratio")
+
+                ref_imgs: list[tuple[bytes, str]] = []
+                if use_direct and attached_images:
+                    ref_imgs.extend(attached_images)
+
+                if fetch_message_image and ref_msg_ids:
+                    for r_mid in ref_msg_ids[:6]:
+                        try:
+                            fetched = await fetch_message_image(int(r_mid))
+                            if fetched:
+                                ref_imgs.append(fetched)
+                        except Exception as fe:
+                            logger.debug("Failed fetching ref image %s: %s", r_mid, fe)
+
+                # Smart fallback: if model intended to edit a recent image (`use_direct=True`)
+                # and neither direct attachment nor explicit message_id was given, grab the latest chat image!
+                if use_direct and not ref_imgs and fetch_message_image:
+                    latest = await db.get_latest_group_image_file_id(chat_id)
+                    if latest:
+                        fetched = await fetch_message_image(latest[0])
+                        if fetched:
+                            ref_imgs.append(fetched)
+
+                gen_res = await generate_or_edit_image_bytes(
+                    img_prompt,
+                    reference_images=ref_imgs if ref_imgs else None,
+                    aspect_ratio=aspect_ratio,
+                )
+                if gen_res.get("image_bytes"):
+                    generated_media["bytes"] = gen_res["image_bytes"]
+                    generated_media["mime"] = gen_res.get("mime_type") or "image/png"
+                    return {
+                        "generated": True,
+                        "mode": "edit" if ref_imgs else "create",
+                        "reference_image_count": len(ref_imgs),
+                        "note": (
+                            "Image is ready and will be sent directly as a Telegram photo! "
+                            "Write a short, witty, natural caption (under 900 characters) to go with it."
+                        ),
+                    }
+                return {
+                    "generated": False,
+                    "error": gen_res.get("model_text") or "Image model did not return an image.",
+                }
+
+            if fn_name == "inspect_chat_image":
+                if not fetch_message_image:
+                    return {"error": "Image fetching unavailable in this context."}
+                target_mid = fn_args.get("message_id")
+                if not target_mid:
+                    latest = await db.get_latest_group_image_file_id(chat_id)
+                    if latest:
+                        target_mid = latest[0]
+                if not target_mid:
+                    return {"error": "No recent image found in group chat."}
+                fetched = await fetch_message_image(int(target_mid))
+                if not fetched:
+                    return {"error": f"Message #{target_mid} has no downloadable image."}
+                q_vis = (fn_args.get("question") or "Describe this image in detail.").strip()
+                analysis = await describe_images_with_neon(q_vis, [fetched])
+                return {"message_id": int(target_mid), "visual_analysis": analysis}
+
             return {"error": f"Unknown tool: {fn_name}"}
+
+        generated_media: dict[str, Any] = {"bytes": None, "mime": "image/png"}
+
+        attached_note = ""
+        if attached_images:
+            attached_note = (
+                f"\n[Visual Context: {len(attached_images)} image(s) from the user's message / replied-to message "
+                f"are attached directly to your vision input and ready for inspection or `generate_or_edit_image`!]\n"
+            )
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         system_instruction = f"""You are <b>symm.city bot</b>, the resident AI companion and community brain for the <b>symm.city</b> Telegram group chat (<code>@symmcity</code> / https://symm.city), created by <b>symm</b> (<code>@symmetricalboy</code> / Dylan).
@@ -1021,9 +1169,17 @@ Current Time: {now_str}
 PERSONA & VIBE:
 - Warm, sharp, witty, grounded, and genuinely part of the @symmcity hangout — like a longtime regular who knows everyone in the group, remembers their stories, projects, gear, hot takes, and inside jokes.
 - Never robotic or sycophantic. Match the playful, candid, eclectic energy of symm.city while staying helpful, accurate, and kind.
-- Never fabricate personal facts about members or symm. Rely on your Long-Term Memories, Member Profiles, Floating 250-Message Chat Window, Bluesky Archive, and your `search_chat_history` / `get_member_memories` tools!
+- Never fabricate personal facts about members or symm. Rely on your Long-Term Memories, Member Profiles, Floating 250-Message Chat Window, and your `search_chat_history` / `get_member_memories` tools!
 - Whenever someone asks about an older conversation, specific quote, first message, or a member detail not already shown below, proactively call `search_chat_history` or `get_member_memories` before answering.
 - Whenever someone shares a new durable personal fact or asks you to remember something, call `remember_fact` so it persists forever.
+
+IMAGE GENERATION, EDITING & VISION:
+- You have native multimodal vision AND the `generate_or_edit_image` tool (powered by Nano Banana 2.1).
+- Contextually decide what the user wants:
+  • If they ask you to create, draw, render, imagine, illustrate, or generate an image/meme/scene -> call `generate_or_edit_image` (`use_attached_or_replied_images=false`, unless using a reference image).
+  • If they attach or reply to an image (or mention a recent chat image `[img_msg_id=...]`) and ask to edit, modify, remix, restyle, swap, add/remove something, or combine images -> call `generate_or_edit_image` (`use_attached_or_replied_images=true` and/or `reference_message_ids=[...]`).
+  • If they attach or reply to an image and ask a question about it (e.g. "what is this?", "fix this error", "translate the text in this photo") -> inspect the attached image directly with your vision (or `inspect_chat_image` for an unattached `[img_msg_id=...]` message) and answer in text WITHOUT generating an image.
+- When `generate_or_edit_image` succeeds, keep your text response under 900 characters so it fits cleanly as the photo's caption!
 
 === CORE SYMM.CITY KNOWLEDGE ===
 {core_and_bluesky}
@@ -1042,7 +1198,7 @@ PERSONA & VIBE:
 
 OUTPUT FORMATTING RULES (STRICT):
 1. Reply in the SAME language that the asking user used in their question.
-2. Keep responses concise, natural, and engaging (MUST NEVER exceed 3,500 characters).
+2. Keep responses concise, natural, and engaging (MUST NEVER exceed 3,500 characters, or 900 characters when attaching a generated image).
 3. Format strictly using Telegram-supported HTML tags ONLY:
    <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;u&gt;</code>, <code>&lt;s&gt;</code>, <code>&lt;code&gt;</code>, <code>&lt;pre&gt;</code>, <code>&lt;blockquote&gt;</code>, <code>&lt;tg-spoiler&gt;</code>, <code>&lt;a href="..."&gt;</code>.
    NEVER use Markdown (`**bold**`, `*italic*`, `### headers`, or ``` fences) and escape any literal `&`, `<`, `>` that are not one of the allowed HTML tags above!"""
@@ -1063,7 +1219,7 @@ OUTPUT FORMATTING RULES (STRICT):
 
         user_prompt = (
             f"Asking Member: {asker_name}{asker_handle} [user_id={asker_id} | Level {asker_lvl} ({asker_tag}) | {asker_cxp:,} CXP{asker_loc}]"
-            f"{reply_block}\n"
+            f"{attached_note}{reply_block}\n"
             f"Question / Prompt: {clean_q}"
         )
 
@@ -1072,14 +1228,22 @@ OUTPUT FORMATTING RULES (STRICT):
             system_instruction=system_instruction,
             tools=ASK_TOOLS,
             tool_executor=_execute_tool,
+            input_images=attached_images,
             thinking_level="medium",
             max_tool_rounds=3,
         )
 
         cleaned_html = sanitize_telegram_html(raw_answer)
-        if not cleaned_html:
-            return html.escape("I drew a blank on that one — try asking me again in a sec!")
-        return cleaned_html
+        if not cleaned_html and not generated_media["bytes"]:
+            cleaned_html = html.escape(
+                "I drew a blank on that one — try asking me again in a sec!"
+            )
+
+        return {
+            "text": cleaned_html,
+            "image_bytes": generated_media["bytes"],
+            "image_mime": generated_media["mime"],
+        }
 
 
 memory_engine = MemoryEngine()

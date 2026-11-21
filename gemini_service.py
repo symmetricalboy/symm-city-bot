@@ -1,9 +1,12 @@
 """
 Unified async Gemini API client wrapper for symm.city bot.
-Uses `gemini-4-neon` via the GA Interactions API (`client.aio.interactions.create`)
-and `gemini-embedding-2` (`768` dimensions) via `client.aio.models.embed_content`.
+Uses:
+  - `gemini-4-neon` via the GA Interactions API (`client.aio.interactions.create`)
+  - `gemini-nano-banana-2.1` (Nano Banana 2.1) for contextual image generation & editing
+  - `gemini-embedding-2` (`768` dimensions) via `client.aio.models.embed_content`
 """
 
+import base64
 import json
 import logging
 import os
@@ -18,8 +21,26 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 GEMINI_CHAT_MODEL = os.getenv("GEMINI_MODEL", "gemini-4-neon")
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 GEMINI_EMBEDDING_DIM = 768
+
+VALID_ASPECT_RATIOS = {
+    "1:1",
+    "2:3",
+    "3:2",
+    "3:4",
+    "4:3",
+    "4:5",
+    "5:4",
+    "9:16",
+    "16:9",
+    "21:9",
+    "1:4",
+    "4:1",
+    "1:8",
+    "8:1",
+}
 
 _client: genai.Client | None = None
 _client_key: str | None = None
@@ -56,6 +77,39 @@ def extract_interaction_text(interaction: Any) -> str:
     return "".join(parts).strip()
 
 
+def _decode_image_part(img_obj: Any) -> tuple[bytes | None, str]:
+    """Decode an `ImageContent` object's `data` field (`str` base64 or `bytes`) to `(bytes, mime_type)`."""
+    if not img_obj:
+        return None, "image/png"
+    raw_data = getattr(img_obj, "data", None)
+    mime = getattr(img_obj, "mime_type", None) or "image/png"
+    if not raw_data:
+        return None, mime
+    if isinstance(raw_data, (bytes, bytearray)):
+        return bytes(raw_data), mime
+    if isinstance(raw_data, str):
+        return base64.b64decode(raw_data), mime
+    return None, mime
+
+
+def extract_interaction_image(interaction: Any) -> tuple[bytes | None, str]:
+    """Safely extract the last generated image `(bytes, mime_type)` from an Interaction object."""
+    out_img = getattr(interaction, "output_image", None)
+    if out_img:
+        b, m = _decode_image_part(out_img)
+        if b:
+            return b, m
+
+    for step in reversed(getattr(interaction, "steps", None) or []):
+        if getattr(step, "type", None) == "model_output":
+            for item in reversed(getattr(step, "content", None) or []):
+                if getattr(item, "type", None) == "image":
+                    b, m = _decode_image_part(item)
+                    if b:
+                        return b, m
+    return None, "image/png"
+
+
 async def generate_text(
     prompt: str,
     *,
@@ -81,6 +135,83 @@ async def generate_text(
 
     interaction = await client.aio.interactions.create(**kwargs)
     return extract_interaction_text(interaction)
+
+
+async def describe_images_with_neon(
+    prompt: str,
+    images: list[tuple[bytes, str]],
+    *,
+    thinking_level: str = "low",
+    model: str = GEMINI_CHAT_MODEL,
+) -> str:
+    """Inspect one or more images with `gemini-4-neon` and answer `prompt`."""
+    client = get_gemini_client()
+    if not client:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for img_bytes, mime_type in images[:6]:
+        content.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(img_bytes).decode("ascii"),
+                "mime_type": mime_type or "image/jpeg",
+            }
+        )
+
+    interaction = await client.aio.interactions.create(
+        model=model,
+        input=[{"type": "user_input", "content": content}],
+        store=False,
+        generation_config={"thinking_level": thinking_level},
+    )
+    return extract_interaction_text(interaction)
+
+
+async def generate_or_edit_image_bytes(
+    prompt: str,
+    *,
+    reference_images: list[tuple[bytes, str]] | None = None,
+    aspect_ratio: str | None = None,
+    model: str = GEMINI_IMAGE_MODEL,
+) -> dict[str, Any]:
+    """
+    Generate a new image or edit/combine up to 14 reference images using
+    `gemini-nano-banana-2.1` via the GA Interactions API.
+    """
+    client = get_gemini_client()
+    if not client:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    content_blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for img_bytes, mime_type in (reference_images or [])[:14]:
+        content_blocks.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(img_bytes).decode("ascii"),
+                "mime_type": mime_type or "image/jpeg",
+            }
+        )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": content_blocks,
+        "store": False,
+    }
+    if aspect_ratio and aspect_ratio in VALID_ASPECT_RATIOS:
+        kwargs["response_format"] = {
+            "type": "image",
+            "aspect_ratio": aspect_ratio,
+        }
+
+    interaction = await client.aio.interactions.create(**kwargs)
+    img_bytes, img_mime = extract_interaction_image(interaction)
+    model_text = extract_interaction_text(interaction)
+    return {
+        "image_bytes": img_bytes,
+        "mime_type": img_mime,
+        "model_text": model_text,
+    }
 
 
 async def generate_json(
@@ -117,7 +248,6 @@ async def generate_json(
     if not raw_text:
         return None
 
-    # Strip accidental markdown fences if present
     cleaned = raw_text.strip()
     if cleaned.startswith("```json"):
         cleaned = cleaned[7:]
@@ -134,22 +264,33 @@ async def run_agentic_interaction(
     system_instruction: str,
     tools: list[dict[str, Any]],
     tool_executor: Callable[[str, dict[str, Any]], Awaitable[Any]],
+    input_images: list[tuple[bytes, str]] | None = None,
     thinking_level: str = "medium",
     max_tool_rounds: int = 3,
     model: str = GEMINI_CHAT_MODEL,
 ) -> str:
     """
-    Execute an async `gemini-4-neon` interaction supporting multi-step function calling
-    in stateless mode (`store=False`).
+    Execute an async `gemini-4-neon` interaction supporting multimodal vision inputs
+    and multi-step function calling in stateless mode (`store=False`).
     """
     client = get_gemini_client()
     if not client:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": input_text}]
+    for img_bytes, mime_type in (input_images or [])[:6]:
+        user_content.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(img_bytes).decode("ascii"),
+                "mime_type": mime_type or "image/jpeg",
+            }
+        )
+
     history: list[dict[str, Any]] = [
         {
             "type": "user_input",
-            "content": [{"type": "text", "text": input_text}],
+            "content": user_content,
         }
     ]
 
@@ -173,14 +314,12 @@ async def run_agentic_interaction(
         if not function_calls or _round >= max_tool_rounds:
             return extract_interaction_text(interaction)
 
-        # Append all returned model steps (including thought + function_call steps) verbatim
         for step in steps:
             if hasattr(step, "model_dump"):
                 history.append(step.model_dump(exclude_none=True))
             elif isinstance(step, dict):
                 history.append(step)
 
-        # Execute requested tool calls and append function_result steps
         for fc in function_calls:
             fn_name = getattr(fc, "name", "") or ""
             raw_args = getattr(fc, "arguments", None) or {}
