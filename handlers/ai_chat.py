@@ -234,6 +234,10 @@ async def _run_ask_flow(
         current_action[0] = ChatAction.UPLOAD_PHOTO
         action_switch_event.set()
 
+    async def _switch_to_upload_animation():
+        current_action[0] = ChatAction.UPLOAD_VIDEO
+        action_switch_event.set()
+
     def _stop_action_pulse():
         nonlocal stop_action
         stop_action = True
@@ -280,6 +284,7 @@ async def _run_ask_flow(
                 attached_images=attached_images if attached_images else None,
                 fetch_message_image=_fetch_chat_msg_image,
                 on_image_action=_switch_to_upload_photo,
+                on_gif_action=_switch_to_upload_animation,
             ),
             timeout=165.0,
         )
@@ -289,8 +294,76 @@ async def _run_ask_flow(
         answer_text = (ai_res.get("text") or "").strip()
         gen_img_bytes: bytes | None = ai_res.get("image_bytes")
         gen_img_mime: str = ai_res.get("image_mime") or "image/png"
+        media_kind: str = ai_res.get("media_kind") or (
+            "animation" if gen_img_mime == "image/gif" else "photo"
+        )
+        is_gif_output = bool(gen_img_bytes and media_kind == "animation")
 
-        if gen_img_bytes:
+        if is_gif_output:
+            gif_w = ai_res.get("width")
+            gif_h = ai_res.get("height")
+            try:
+                await context.bot.send_chat_action(
+                    chat_id=chat_id,
+                    action=ChatAction.UPLOAD_VIDEO,
+                    message_thread_id=action_thread_id,
+                )
+            except Exception:
+                pass
+
+            if len(answer_text) <= MessageLimit.CAPTION_LENGTH:
+                try:
+                    sent_msg = await context.bot.send_animation(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        animation=io.BytesIO(gen_img_bytes),
+                        filename="symm_animation.gif",
+                        width=gif_w,
+                        height=gif_h,
+                        caption=answer_text or None,
+                        parse_mode=ParseMode.HTML if answer_text else None,
+                        reply_to_message_id=update.message.message_id,
+                    )
+                except BadRequest as html_err:
+                    logger.warning("HTML caption fallback in /ask animation (%s)", html_err)
+                    plain_cap = html.unescape(re.sub(r"<[^>]+>", "", answer_text)).strip()
+                    sent_msg = await context.bot.send_animation(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        animation=io.BytesIO(gen_img_bytes),
+                        filename="symm_animation.gif",
+                        width=gif_w,
+                        height=gif_h,
+                        caption=plain_cap[: MessageLimit.CAPTION_LENGTH] or None,
+                        reply_to_message_id=update.message.message_id,
+                    )
+            else:
+                sent_msg = await context.bot.send_animation(
+                    chat_id=chat_id,
+                    message_thread_id=send_thread_id,
+                    animation=io.BytesIO(gen_img_bytes),
+                    filename="symm_animation.gif",
+                    width=gif_w,
+                    height=gif_h,
+                    reply_to_message_id=update.message.message_id,
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        text=answer_text[:3900],
+                        parse_mode=ParseMode.HTML,
+                        reply_to_message_id=sent_msg.message_id,
+                    )
+                except BadRequest:
+                    plain_fallback = html.unescape(re.sub(r"<[^>]+>", "", answer_text))
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        text=plain_fallback[:3900],
+                        reply_to_message_id=sent_msg.message_id,
+                    )
+        elif gen_img_bytes:
             upload_bytes, fname = await asyncio.to_thread(
                 _prepare_telegram_photo_sync, gen_img_bytes, gen_img_mime
             )
@@ -392,11 +465,15 @@ async def _run_ask_flow(
                     created_at=update.message.date,
                 )
                 plain_bot_reply = html.unescape(re.sub(r"<[^>]+>", "", answer_text)).strip()
-                bot_archive_text = (
-                    f"[Generated Image] {plain_bot_reply}".strip()
-                    if gen_img_bytes
-                    else plain_bot_reply
-                )
+                if is_gif_output:
+                    bot_archive_text = f"[Generated GIF] {plain_bot_reply}".strip()
+                    bot_media_type = "animation"
+                elif gen_img_bytes:
+                    bot_archive_text = f"[Generated Image] {plain_bot_reply}".strip()
+                    bot_media_type = "photo"
+                else:
+                    bot_archive_text = plain_bot_reply
+                    bot_media_type = None
                 bot_sent_fid = extract_image_file_id(sent_msg)
                 bot_me = context.bot
                 await db.record_group_chat_message(
@@ -405,11 +482,11 @@ async def _run_ask_flow(
                     user_id=bot_me.id,
                     sender_name=getattr(bot_me, "first_name", None) or "symm.city bot",
                     sender_username=getattr(bot_me, "username", None) or "symmcitybot",
-                    content=bot_archive_text or "[Generated Image]",
+                    content=bot_archive_text or ("[Generated GIF]" if is_gif_output else "[Generated Image]"),
                     is_bot=True,
                     reply_to_message_id=update.message.message_id,
                     thread_id=thread_id,
-                    media_type="photo" if gen_img_bytes else None,
+                    media_type=bot_media_type,
                     media_file_id=bot_sent_fid,
                     created_at=sent_msg.date,
                 )

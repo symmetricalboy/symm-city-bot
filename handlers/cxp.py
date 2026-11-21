@@ -356,22 +356,29 @@ def _extract_message_content_and_media(
 
 
 def extract_image_file_id(message) -> str | None:
-    """Extract a downloadable Telegram `file_id` if `message` contains a photo, image file, or static sticker."""
+    """Extract a downloadable Telegram `file_id` if `message` contains a photo, image file, GIF/animation, or sticker."""
     if not message:
         return None
     photos = getattr(message, "photo", None)
     if photos:
         return getattr(photos[-1], "file_id", None)
+    anim = getattr(message, "animation", None)
+    if anim:
+        if (getattr(anim, "mime_type", None) or "").lower() == "image/gif":
+            return getattr(anim, "file_id", None)
+        thumb = getattr(anim, "thumbnail", None)
+        if thumb and getattr(thumb, "file_id", None):
+            return thumb.file_id
     doc = getattr(message, "document", None)
     if doc and (getattr(doc, "mime_type", None) or "").lower().startswith("image/"):
         return getattr(doc, "file_id", None)
     sticker = getattr(message, "sticker", None)
-    if (
-        sticker
-        and not getattr(sticker, "is_animated", False)
-        and not getattr(sticker, "is_video", False)
-    ):
-        return getattr(sticker, "file_id", None)
+    if sticker:
+        if not getattr(sticker, "is_animated", False) and not getattr(sticker, "is_video", False):
+            return getattr(sticker, "file_id", None)
+        thumb = getattr(sticker, "thumbnail", None)
+        if thumb and getattr(thumb, "file_id", None):
+            return thumb.file_id
     return None
 
 

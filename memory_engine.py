@@ -24,6 +24,11 @@ from gemini_service import (
     run_agentic_interaction,
 )
 from handlers.cxp import _get_member_tag_string, calculate_level
+from handlers.gif_builder import (
+    build_sprite_sheet_prompt,
+    infer_aspect_ratio_from_image_bytes,
+    slice_grid_to_gif_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -377,11 +382,12 @@ ASK_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "name": "generate_or_edit_image",
         "description": (
-            "Contextually generate a brand-new image from a description OR edit/remix/combine one or more "
+            "Contextually generate a brand-new STATIC image from a description OR edit/remix/combine one or more "
             "existing images using Nano Banana 2.1 (`gemini-nano-banana-2.1`). Call this whenever the user "
             "asks to draw, create, render, visualize, meme-ify, edit, modify, restyle, swap, add/remove elements, "
-            "or transform an attached, replied-to, or recently posted image. Do NOT call this if the user is "
-            "merely asking a factual question about what is inside an attached image."
+            "or transform an attached, replied-to, or recently posted image into a static picture. "
+            "If the user wants an ANIMATED GIF or asks to animate something, call `generate_animated_gif` instead! "
+            "Do NOT call this if the user is merely asking a factual question about what is inside an attached image."
         ),
         "parameters": {
             "type": "object",
@@ -413,6 +419,71 @@ ASK_TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"],
                     "description": "Optional output aspect ratio (omit when editing an existing image to preserve its framing unless requested).",
+                },
+            },
+            "required": ["prompt", "use_attached_or_replied_images"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "generate_animated_gif",
+        "description": (
+            "Generate a looping ANIMATED GIF (from scratch OR by animating an attached, replied-to, or recent chat image) "
+            "by rendering a multi-frame sequential sprite-sheet grid in a single Nano Banana 2.1 image and slicing/stabilizing "
+            "it into an animated GIF with Pillow. Call this whenever the user asks for a GIF, animation, animated meme/reaction, "
+            "looping clip, sprite animation, or asks to animate / bring to life an existing image!"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Detailed description of the subject, visual style, background, and clear step-by-step motion "
+                        "across the animation frames (e.g. 'cyberpunk cat DJ bobbing its head while neon equalizers pulse "
+                        "behind the turntables'). Incorporate relevant member/community details when appropriate."
+                    ),
+                },
+                "use_attached_or_replied_images": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true when animating, remixing, or referencing the image/GIF/sticker attached to the current "
+                        "message or replied-to message; set false when creating a brand-new GIF from scratch."
+                    ),
+                },
+                "reference_message_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Optional message_id(s) marked `[img_msg_id=...]` in the floating chat window when the "
+                        "user asks to animate an earlier image posted in chat without directly replying to it."
+                    ),
+                },
+                "grid_size": {
+                    "type": "string",
+                    "enum": ["2x2", "3x3", "4x4"],
+                    "description": (
+                        "Sprite-sheet grid layout: '3x3' (9 frames, default — best blend of resolution and smooth motion), "
+                        "'2x2' (4 frames — snappy 4-beat memes/blinks), or '4x4' (16 frames — longer fluid action)."
+                    ),
+                },
+                "fps": {
+                    "type": "integer",
+                    "description": "Playback speed in frames per second (4 to 14, default 8).",
+                },
+                "loop_mode": {
+                    "type": "string",
+                    "enum": ["loop", "pingpong"],
+                    "description": (
+                        "Use 'pingpong' (forward-then-reverse boomerang) for oscillating, waving, nodding, dancing, "
+                        "vibing, zooming, or expressive actions so they loop seamlessly with zero jump cut; use 'loop' "
+                        "for continuous one-way cycles like spinning, falling rain/snow, walking, or orbiting."
+                    ),
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+                    "description": "Optional per-frame aspect ratio (omit when animating a reference image to preserve its framing, or defaults to '1:1').",
                 },
             },
             "required": ["prompt", "use_attached_or_replied_images"],
@@ -824,11 +895,12 @@ class MemoryEngine:
         attached_images: list[tuple[bytes, str]] | None = None,
         fetch_message_image: Callable[[int], Awaitable[tuple[bytes, str] | None]] | None = None,
         on_image_action: Callable[[], Awaitable[None]] | None = None,
+        on_gif_action: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """
-        Generate a context-rich, memory-grounded answer (and optional generated/edited image)
+        Generate a context-rich, memory-grounded answer (and optional generated/edited image or animated GIF)
         using `gemini-4-neon` + `gemini-nano-banana-2.1`.
-        Returns `{"text": html_str, "image_bytes": bytes | None, "image_mime": str}`.
+        Returns `{"text": html_str, "image_bytes": bytes | None, "image_mime": str, "media_kind": str, "width": int | None, "height": int | None}`.
         """
         # Clean accidental literal "<question>" copied from /help examples
         clean_q = re.sub(r"^\s*<question>\s*[.:,-]?\s*", "", question.strip(), flags=re.IGNORECASE).strip()
@@ -1082,6 +1154,32 @@ class MemoryEngine:
                 )
                 return {"saved": bool(doc_id), "document_id": doc_id}
 
+            async def _gather_ref_images(
+                use_direct: bool, ref_msg_ids: list[Any]
+            ) -> list[tuple[bytes, str]]:
+                ref_imgs: list[tuple[bytes, str]] = []
+                if use_direct and attached_images:
+                    ref_imgs.extend(attached_images)
+
+                if fetch_message_image and ref_msg_ids:
+                    for r_mid in ref_msg_ids[:6]:
+                        try:
+                            fetched = await fetch_message_image(int(r_mid))
+                            if fetched:
+                                ref_imgs.append(fetched)
+                        except Exception as fe:
+                            logger.debug("Failed fetching ref image %s: %s", r_mid, fe)
+
+                # Smart fallback: if model intended to edit/animate a recent image (`use_direct=True`)
+                # and neither direct attachment nor explicit message_id was given, grab the latest chat image!
+                if use_direct and not ref_imgs and fetch_message_image:
+                    latest = await db.get_latest_group_image_file_id(chat_id)
+                    if latest:
+                        fetched = await fetch_message_image(latest[0])
+                        if fetched:
+                            ref_imgs.append(fetched)
+                return ref_imgs
+
             if fn_name == "generate_or_edit_image":
                 img_prompt = (fn_args.get("prompt") or "").strip()
                 if not img_prompt:
@@ -1096,28 +1194,7 @@ class MemoryEngine:
                 use_direct = bool(fn_args.get("use_attached_or_replied_images"))
                 ref_msg_ids = fn_args.get("reference_message_ids") or []
                 aspect_ratio = fn_args.get("aspect_ratio")
-
-                ref_imgs: list[tuple[bytes, str]] = []
-                if use_direct and attached_images:
-                    ref_imgs.extend(attached_images)
-
-                if fetch_message_image and ref_msg_ids:
-                    for r_mid in ref_msg_ids[:6]:
-                        try:
-                            fetched = await fetch_message_image(int(r_mid))
-                            if fetched:
-                                ref_imgs.append(fetched)
-                        except Exception as fe:
-                            logger.debug("Failed fetching ref image %s: %s", r_mid, fe)
-
-                # Smart fallback: if model intended to edit a recent image (`use_direct=True`)
-                # and neither direct attachment nor explicit message_id was given, grab the latest chat image!
-                if use_direct and not ref_imgs and fetch_message_image:
-                    latest = await db.get_latest_group_image_file_id(chat_id)
-                    if latest:
-                        fetched = await fetch_message_image(latest[0])
-                        if fetched:
-                            ref_imgs.append(fetched)
+                ref_imgs = await _gather_ref_images(use_direct, ref_msg_ids)
 
                 gen_res = await generate_or_edit_image_bytes(
                     img_prompt,
@@ -1127,6 +1204,9 @@ class MemoryEngine:
                 if gen_res.get("image_bytes"):
                     generated_media["bytes"] = gen_res["image_bytes"]
                     generated_media["mime"] = gen_res.get("mime_type") or "image/png"
+                    generated_media["kind"] = "photo"
+                    generated_media["width"] = None
+                    generated_media["height"] = None
                     return {
                         "generated": True,
                         "mode": "edit" if ref_imgs else "create",
@@ -1139,6 +1219,92 @@ class MemoryEngine:
                 return {
                     "generated": False,
                     "error": gen_res.get("model_text") or "Image model did not return an image.",
+                }
+
+            if fn_name == "generate_animated_gif":
+                gif_prompt = (fn_args.get("prompt") or "").strip()
+                if not gif_prompt:
+                    return {"generated": False, "error": "Empty GIF animation prompt."}
+
+                if on_gif_action:
+                    try:
+                        await on_gif_action()
+                    except Exception:
+                        pass
+                elif on_image_action:
+                    try:
+                        await on_image_action()
+                    except Exception:
+                        pass
+
+                use_direct = bool(fn_args.get("use_attached_or_replied_images"))
+                ref_msg_ids = fn_args.get("reference_message_ids") or []
+                grid_size = fn_args.get("grid_size") or "3x3"
+                if grid_size not in ("2x2", "3x3", "4x4"):
+                    grid_size = "3x3"
+                fps = int(fn_args.get("fps") or 8)
+                loop_mode = fn_args.get("loop_mode") or "loop"
+                if loop_mode not in ("loop", "pingpong"):
+                    loop_mode = "loop"
+
+                ref_imgs = await _gather_ref_images(use_direct, ref_msg_ids)
+                aspect_ratio = fn_args.get("aspect_ratio")
+                if not aspect_ratio:
+                    if ref_imgs:
+                        aspect_ratio = await asyncio.to_thread(
+                            infer_aspect_ratio_from_image_bytes, ref_imgs[0][0]
+                        )
+                    else:
+                        aspect_ratio = "1:1"
+
+                sheet_prompt = build_sprite_sheet_prompt(
+                    gif_prompt,
+                    grid_size=grid_size,
+                    loop_mode=loop_mode,
+                    has_reference_images=bool(ref_imgs),
+                )
+
+                gen_res = await generate_or_edit_image_bytes(
+                    sheet_prompt,
+                    reference_images=ref_imgs if ref_imgs else None,
+                    aspect_ratio=aspect_ratio,
+                )
+                sheet_bytes = gen_res.get("image_bytes")
+                if not sheet_bytes:
+                    return {
+                        "generated": False,
+                        "error": gen_res.get("model_text") or "Image model did not return a sprite sheet.",
+                    }
+
+                try:
+                    gif_res = await asyncio.to_thread(
+                        slice_grid_to_gif_sync,
+                        sheet_bytes,
+                        grid_size=grid_size,
+                        fps=fps,
+                        loop_mode=loop_mode,
+                    )
+                except Exception as gif_err:
+                    logger.error("Failed slicing sprite sheet into GIF: %s", gif_err, exc_info=True)
+                    return {"generated": False, "error": f"GIF processing failed: {gif_err}"}
+
+                generated_media["bytes"] = gif_res["gif_bytes"]
+                generated_media["mime"] = "image/gif"
+                generated_media["kind"] = "animation"
+                generated_media["width"] = gif_res["width"]
+                generated_media["height"] = gif_res["height"]
+                return {
+                    "generated": True,
+                    "media_type": "animated_gif",
+                    "grid_size": grid_size,
+                    "unique_frames": gif_res["unique_frames"],
+                    "loop_mode": loop_mode,
+                    "fps": fps,
+                    "reference_image_count": len(ref_imgs),
+                    "note": (
+                        "Animated GIF is ready and will be sent directly as an autoplaying Telegram GIF! "
+                        "Write a short, witty, natural caption (under 900 characters) to go with it."
+                    ),
                 }
 
             if fn_name == "inspect_chat_image":
@@ -1160,13 +1326,19 @@ class MemoryEngine:
 
             return {"error": f"Unknown tool: {fn_name}"}
 
-        generated_media: dict[str, Any] = {"bytes": None, "mime": "image/png"}
+        generated_media: dict[str, Any] = {
+            "bytes": None,
+            "mime": "image/png",
+            "kind": "photo",
+            "width": None,
+            "height": None,
+        }
 
         attached_note = ""
         if attached_images:
             attached_note = (
                 f"\n[Visual Context: {len(attached_images)} image(s) from the user's message / replied-to message "
-                f"are attached directly to your vision input and ready for inspection or `generate_or_edit_image`!]\n"
+                f"are attached directly to your vision input and ready for inspection, `generate_or_edit_image`, or `generate_animated_gif`!]\n"
             )
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1180,13 +1352,14 @@ PERSONA & VIBE:
 - Whenever someone asks about an older conversation, specific quote, first message, or a member detail not already shown below, proactively call `search_chat_history` or `get_member_memories` before answering.
 - Whenever someone shares a new durable personal fact or asks you to remember something, call `remember_fact` so it persists forever.
 
-IMAGE GENERATION, EDITING & VISION:
-- You have native multimodal vision AND the `generate_or_edit_image` tool (powered by Nano Banana 2.1).
+IMAGE GENERATION, EDITING, ANIMATED GIFS & VISION:
+- You have native multimodal vision PLUS `generate_or_edit_image` (static images) AND `generate_animated_gif` (animated GIFs rendered via Nano Banana 2.1 sprite grids + Pillow).
 - Contextually decide what the user wants:
-  • If they ask you to create, draw, render, imagine, illustrate, or generate an image/meme/scene -> call `generate_or_edit_image` (`use_attached_or_replied_images=false`, unless using a reference image).
-  • If they attach or reply to an image (or mention a recent chat image `[img_msg_id=...]`) and ask to edit, modify, remix, restyle, swap, add/remove something, or combine images -> call `generate_or_edit_image` (`use_attached_or_replied_images=true` and/or `reference_message_ids=[...]`).
-  • If they attach or reply to an image and ask a question about it (e.g. "what is this?", "fix this error", "translate the text in this photo") -> inspect the attached image directly with your vision (or `inspect_chat_image` for an unattached `[img_msg_id=...]` message) and answer in text WITHOUT generating an image.
-- When `generate_or_edit_image` succeeds, keep your text response under 900 characters so it fits cleanly as the photo's caption!
+  • If they ask for a **GIF, animation, animated meme/reaction, looping clip, sprite animation**, OR ask to **animate / bring to life** an attached, replied-to, or recent chat image (`[img_msg_id=...]`) -> call `generate_animated_gif`! Pick `loop_mode="pingpong"` for waving/nodding/dancing/vibing/zooming/expressive actions and `loop_mode="loop"` for continuous cycles like spinning, falling rain, or walking.
+  • If they ask to create, draw, render, imagine, illustrate, or generate a **static** image/meme/scene -> call `generate_or_edit_image` (`use_attached_or_replied_images=false`, unless referencing an existing image).
+  • If they attach or reply to an image (or mention `[img_msg_id=...]`) and ask for a **static** edit, modification, remix, restyle, swap, or element addition/removal -> call `generate_or_edit_image` (`use_attached_or_replied_images=true` and/or `reference_message_ids=[...]`).
+  • If they attach or reply to an image and ask a question about it (e.g. "what is this?", "fix this error", "translate the text in this photo") -> inspect the attached image directly with your vision (or `inspect_chat_image` for an unattached `[img_msg_id=...]` message) and answer in text WITHOUT generating media.
+- When `generate_or_edit_image` or `generate_animated_gif` succeeds, keep your text response under 900 characters so it fits cleanly as the media caption!
 
 === CORE SYMM.CITY KNOWLEDGE ===
 {core_and_bluesky}
@@ -1250,6 +1423,9 @@ OUTPUT FORMATTING RULES (STRICT):
             "text": cleaned_html,
             "image_bytes": generated_media["bytes"],
             "image_mime": generated_media["mime"],
+            "media_kind": generated_media["kind"],
+            "width": generated_media["width"],
+            "height": generated_media["height"],
         }
 
 
