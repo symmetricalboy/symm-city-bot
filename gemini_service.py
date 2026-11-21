@@ -3,6 +3,7 @@ Unified async Gemini API client wrapper for symm.city bot.
 Uses:
   - `gemini-4-neon` via the GA Interactions API (`client.aio.interactions.create`)
   - `gemini-nano-banana-2.1` (Nano Banana 2.1) for contextual image generation & editing
+  - `gemini-omni-1.2-flash` (Gemini Omni 1.2 Flash) for video & GIF generation, editing, and extension
   - `gemini-embedding-2` (`768` dimensions) via `client.aio.models.embed_content`
 """
 
@@ -11,6 +12,8 @@ import base64
 import json
 import logging
 import os
+import re
+import tempfile
 from typing import Any, Awaitable, Callable
 
 from dotenv import load_dotenv
@@ -23,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 GEMINI_CHAT_MODEL = os.getenv("GEMINI_MODEL", "gemini-4-neon")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
+GEMINI_VIDEO_MODEL = os.getenv("GEMINI_VIDEO_MODEL", "gemini-omni-1.2-flash")
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 GEMINI_EMBEDDING_DIM = 768
 
@@ -43,8 +47,13 @@ VALID_ASPECT_RATIOS = {
     "8:1",
 }
 
+VALID_VIDEO_ASPECT_RATIOS = {"16:9", "9:16"}
+VALID_VIDEO_RESOLUTIONS = {"360p", "720p", "1080p", "4k"}
+
 _client: genai.Client | None = None
 _client_key: str | None = None
+_video_client: genai.Client | None = None
+_video_client_key: str | None = None
 
 
 def get_gemini_client() -> genai.Client | None:
@@ -66,10 +75,30 @@ def get_gemini_client() -> genai.Client | None:
     return _client
 
 
+def get_video_gemini_client() -> genai.Client | None:
+    """Return a cached `genai.Client` with an extended 420s HTTP timeout for Gemini Omni 1.2 Flash video generation."""
+    global _video_client, _video_client_key
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        return None
+    if _video_client is None or _video_client_key != api_key:
+        try:
+            _video_client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=420_000),
+            )
+            _video_client_key = api_key
+        except Exception as e:
+            logger.error("Failed to initialize Gemini video client: %s", e)
+            _video_client = None
+    return _video_client
+
+
 def reset_gemini_client():
-    """Discard cached `genai.Client` so subsequent calls establish fresh HTTP connections."""
-    global _client
+    """Discard cached `genai.Client` instances so subsequent calls establish fresh HTTP connections."""
+    global _client, _video_client
     _client = None
+    _video_client = None
 
 
 async def _create_interaction_with_timeout(
@@ -259,6 +288,292 @@ async def generate_or_edit_image_bytes(
         "mime_type": img_mime,
         "model_text": model_text,
     }
+
+
+def _normalize_gemini_file_uri(uri: str | None) -> str | None:
+    """Normalize any Files API URI to `https://generativelanguage.googleapis.com/files/{id}`."""
+    if not uri:
+        return None
+    m = re.search(r"files/([a-zA-Z0-9_\-]+)", uri)
+    if m:
+        return f"https://generativelanguage.googleapis.com/files/{m.group(1)}"
+    return uri.split("?", 1)[0]
+
+
+async def _upload_bytes_to_files_api(
+    client: genai.Client,
+    raw_bytes: bytes,
+    mime_type: str,
+    display_name: str = "symm_asset",
+) -> tuple[str, str, str]:
+    """
+    Upload in-memory media bytes via `client.aio.files.upload` and poll until `ACTIVE`.
+    Returns `(normalized_uri, resolved_mime_type, file_resource_name)`.
+    """
+    ext_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "video/mp4": ".mp4",
+    }
+    ext = ext_map.get((mime_type or "").lower(), ".bin")
+
+    with tempfile.TemporaryDirectory(prefix="symm_upload_") as tmpdir:
+        tmp_path = os.path.join(tmpdir, f"{display_name}{ext}")
+        with open(tmp_path, "wb") as f:
+            f.write(raw_bytes)
+
+        file_obj = await asyncio.wait_for(
+            client.aio.files.upload(
+                file=tmp_path,
+                config=types.UploadFileConfig(
+                    display_name=display_name,
+                    mime_type=mime_type,
+                ),
+            ),
+            timeout=120.0,
+        )
+
+    file_name = getattr(file_obj, "name", None) or ""
+    interval = 2.0
+    deadline = asyncio.get_running_loop().time() + 150.0
+
+    while True:
+        state = getattr(file_obj, "state", None)
+        state_str = getattr(state, "name", None) or str(state or "")
+        if state == types.FileState.ACTIVE or "ACTIVE" in state_str.upper():
+            norm_uri = _normalize_gemini_file_uri(getattr(file_obj, "uri", None))
+            resolved_mime = getattr(file_obj, "mime_type", None) or mime_type
+            if not norm_uri:
+                raise RuntimeError("Uploaded Gemini File is ACTIVE but missing URI.")
+            return norm_uri, resolved_mime, file_name
+
+        if state == types.FileState.FAILED or "FAILED" in state_str.upper():
+            raise RuntimeError(f"Gemini Files API processing failed for {display_name}.")
+
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(f"Timed out waiting for uploaded file {file_name} to become ACTIVE.")
+
+        await asyncio.sleep(interval)
+        interval = min(interval * 1.25, 8.0)
+        file_obj = await asyncio.wait_for(
+            client.aio.files.get(name=file_name),
+            timeout=25.0,
+        )
+
+
+async def _extract_or_download_output_video(
+    interaction: Any, client: genai.Client
+) -> bytes | None:
+    """Extract inline video bytes OR poll & download `output_video.uri` via `client.aio.files.download`."""
+    vid_obj = getattr(interaction, "output_video", None)
+    if not vid_obj:
+        for step in reversed(getattr(interaction, "steps", None) or []):
+            if getattr(step, "type", None) == "model_output":
+                for item in reversed(getattr(step, "content", None) or []):
+                    if getattr(item, "type", None) == "video":
+                        vid_obj = item
+                        break
+            if vid_obj:
+                break
+
+    if not vid_obj:
+        return None
+
+    raw_data = getattr(vid_obj, "data", None)
+    if raw_data:
+        if isinstance(raw_data, (bytes, bytearray)):
+            return bytes(raw_data)
+        if isinstance(raw_data, str):
+            return base64.b64decode(raw_data)
+
+    vid_uri = getattr(vid_obj, "uri", None)
+    if not vid_uri:
+        return None
+
+    m = re.search(r"files/([a-zA-Z0-9_\-]+)", vid_uri)
+    if m:
+        res_name = f"files/{m.group(1)}"
+        for _ in range(30):
+            try:
+                f_info = await asyncio.wait_for(
+                    client.aio.files.get(name=res_name), timeout=20.0
+                )
+                st = getattr(f_info, "state", None)
+                st_str = getattr(st, "name", None) or str(st or "")
+                if st == types.FileState.ACTIVE or "ACTIVE" in st_str.upper():
+                    break
+                if st == types.FileState.FAILED or "FAILED" in st_str.upper():
+                    raise RuntimeError("Generated video file reported FAILED state.")
+            except RuntimeError:
+                raise
+            except Exception:
+                # Some signed URIs download directly without needing files.get polling
+                break
+            await asyncio.sleep(3.0)
+
+    downloaded = await asyncio.wait_for(
+        client.aio.files.download(file=vid_uri),
+        timeout=150.0,
+    )
+    return bytes(downloaded) if downloaded else None
+
+
+def _append_role_hint(text: str, hint: str) -> str:
+    clean = (text or "").strip()
+    if not clean:
+        return hint
+    sep = "" if clean[-1] in ".!?" else "."
+    return f"{clean}{sep} {hint}"
+
+
+async def generate_omni_video_bytes(
+    prompt: str,
+    *,
+    aspect_ratio: str = "16:9",
+    duration_sec: int = 8,
+    resolution: str = "720p",
+    first_frame: tuple[bytes, str] | None = None,
+    last_frame: tuple[bytes, str] | None = None,
+    loop_same_first_last: bool = False,
+    reference_images: list[tuple[bytes, str]] | None = None,
+    source_video: bytes | None = None,
+    mode: str = "create",
+    model: str = GEMINI_VIDEO_MODEL,
+) -> dict[str, Any]:
+    """
+    Generate, edit, or extend a video with `gemini-omni-1.2-flash` via the GA Interactions API.
+    Automatically uploads any input images/videos via the Gemini Files API, binds media roles
+    using natural language, downloads the resulting MP4 bytes, and cleans up uploaded temp files.
+    """
+    client = get_video_gemini_client()
+    if not client:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    norm_ar = aspect_ratio if aspect_ratio in VALID_VIDEO_ASPECT_RATIOS else "16:9"
+    norm_res = (resolution or "720p").lower()
+    if norm_res not in VALID_VIDEO_RESOLUTIONS:
+        norm_res = "720p"
+
+    has_two_keyframes = bool(first_frame and (last_frame or loop_same_first_last))
+    max_dur = 10 if (has_two_keyframes or mode == "extend") else 15
+    clamped_dur = max(3, min(max_dur, int(duration_sec or 8)))
+
+    uploaded_file_names: list[str] = []
+    try:
+        input_parts: list[dict[str, Any]] = []
+
+        # 1. Optional first frame (+ optional identical or distinct last frame)
+        f1_uri = None
+        f1_mime = None
+        if first_frame:
+            f1_uri, f1_mime, f1_name = await _upload_bytes_to_files_api(
+                client, first_frame[0], first_frame[1] or "image/png", "first_frame"
+            )
+            if f1_name:
+                uploaded_file_names.append(f1_name)
+            input_parts.append({"type": "image", "uri": f1_uri, "mime_type": f1_mime})
+
+            if loop_same_first_last:
+                # Re-use uploaded URI for seamless start==end loop
+                input_parts.append({"type": "image", "uri": f1_uri, "mime_type": f1_mime})
+            elif last_frame:
+                f2_uri, f2_mime, f2_name = await _upload_bytes_to_files_api(
+                    client, last_frame[0], last_frame[1] or "image/png", "last_frame"
+                )
+                if f2_name:
+                    uploaded_file_names.append(f2_name)
+                input_parts.append({"type": "image", "uri": f2_uri, "mime_type": f2_mime})
+
+        # 2. Optional reference images (up to 6 per Omni 1.2 Flash spec)
+        ref_list = list(reference_images or [])[:6]
+        for idx, (r_bytes, r_mime) in enumerate(ref_list):
+            r_uri, r_resolved_mime, r_name = await _upload_bytes_to_files_api(
+                client, r_bytes, r_mime or "image/png", f"ref_img_{idx + 1}"
+            )
+            if r_name:
+                uploaded_file_names.append(r_name)
+            input_parts.append({"type": "image", "uri": r_uri, "mime_type": r_resolved_mime})
+
+        # 3. Optional source video for editing or extension
+        if source_video:
+            v_uri, v_mime, v_name = await _upload_bytes_to_files_api(
+                client, source_video, "video/mp4", "source_video"
+            )
+            if v_name:
+                uploaded_file_names.append(v_name)
+            input_parts.append({"type": "video", "uri": v_uri, "mime_type": v_mime})
+
+        # 4. Natural-language media role bindings (per Gemini Omni 1.2 Flash prompt spec)
+        prompt_text = (prompt or "").strip()
+        low_p = prompt_text.lower()
+        if mode == "extend" and source_video:
+            if not any(k in low_p for k in ("extend", "continue", "continuation", "keep going")):
+                prompt_text = f"Extend this video. {prompt_text}".strip()
+        elif first_frame and loop_same_first_last:
+            if "starting frame" not in low_p and "first frame" not in low_p:
+                first_ref = "the first image" if ref_list else "this image"
+                prompt_text = _append_role_hint(
+                    prompt_text,
+                    f"Use {first_ref} as both the starting frame and the final frame.",
+                )
+        elif first_frame and last_frame:
+            if "starting frame" not in low_p and "first frame" not in low_p:
+                prompt_text = _append_role_hint(
+                    prompt_text,
+                    "Use the first image as the starting frame and the second image as the final frame.",
+                )
+        elif first_frame:
+            if "starting frame" not in low_p and "first frame" not in low_p:
+                first_ref = "the first image" if ref_list else "this image"
+                prompt_text = _append_role_hint(
+                    prompt_text,
+                    f"Use {first_ref} as the starting frame.",
+                )
+
+        input_parts.append({"type": "text", "text": prompt_text})
+
+        video_format: dict[str, Any] = {
+            "type": "video",
+            "delivery": "uri",
+            "duration": f"{clamped_dur}s",
+            "resolution": norm_res,
+        }
+        if mode != "extend":
+            video_format["aspect_ratio"] = norm_ar
+
+        req_kwargs: dict[str, Any] = {
+            "model": model,
+            "input": input_parts,
+            "response_format": video_format,
+        }
+
+        try:
+            interaction = await asyncio.wait_for(
+                client.aio.interactions.create(**req_kwargs),
+                timeout=360.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Gemini Omni video generation timed out after 360s; resetting client.")
+            reset_gemini_client()
+            raise
+
+        video_bytes = await _extract_or_download_output_video(interaction, client)
+        model_text = extract_interaction_text(interaction)
+        return {
+            "video_bytes": video_bytes,
+            "model_text": model_text,
+            "interaction_id": getattr(interaction, "id", None),
+            "duration_sec": clamped_dur,
+            "aspect_ratio": norm_ar,
+        }
+    finally:
+        # Best-effort cleanup of uploaded temporary input files
+        for fname in uploaded_file_names:
+            try:
+                await asyncio.wait_for(client.aio.files.delete(name=fname), timeout=10.0)
+            except Exception:
+                pass
 
 
 async def generate_json(

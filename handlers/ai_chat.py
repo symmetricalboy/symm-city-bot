@@ -11,7 +11,14 @@ from telegram.ext import CallbackContext
 
 from database import db
 from gemini_service import get_gemini_client
-from handlers.cxp import _extract_message_content_and_media, extract_image_file_id
+from handlers.cxp import (
+    LATEST_CHAT_VIDEO,
+    RECENT_VIDEO_CACHE,
+    _extract_message_content_and_media,
+    extract_image_file_id,
+    extract_video_file_id,
+    record_recent_video_file_id,
+)
 from memory_engine import memory_engine
 
 logger = logging.getLogger(__name__)
@@ -93,6 +100,25 @@ async def _download_telegram_image(bot, file_id: str | None) -> tuple[bytes, str
         return None
 
 
+async def _download_telegram_video(bot, file_id: str | None) -> bytes | None:
+    """Download a Telegram video `file_id` (up to Bot API's 20MB limit) with bounded timeout."""
+    if not bot or not file_id:
+        return None
+    try:
+        tg_file = await asyncio.wait_for(bot.get_file(file_id), timeout=15.0)
+        fsize = getattr(tg_file, "file_size", None)
+        if fsize and int(fsize) > 20 * 1024 * 1024:
+            logger.warning("Skipping Telegram video %s exceeding 20MB Bot API download cap (%s bytes).", file_id, fsize)
+            return None
+        raw = bytes(
+            await asyncio.wait_for(tg_file.download_as_bytearray(), timeout=45.0)
+        )
+        return raw if raw else None
+    except Exception as e:
+        logger.warning("Failed downloading Telegram video %s: %s", file_id, e)
+        return None
+
+
 def _is_implicit_topic_root(update: Update, reply) -> bool:
     """Return True if `reply` is merely Telegram's implicit forum topic root rather than an explicit user reply."""
     if getattr(reply, "forum_topic_created", None) is not None:
@@ -144,6 +170,7 @@ def _extract_reply_context(update: Update, bot_id: int | None = None) -> dict | 
         "text": reply_text,
         "is_self_bot": is_self_bot,
         "image_file_id": extract_image_file_id(reply),
+        "video_file_id": extract_video_file_id(reply),
     }
 
 
@@ -266,12 +293,38 @@ async def _run_ask_flow(
             if dl:
                 attached_images.append(dl)
 
+        # Gather any directly attached video on the message or replied-to message
+        msg_vid_fid = extract_video_file_id(update.message)
+        if msg_vid_fid:
+            record_recent_video_file_id(chat_id, update.message.message_id, msg_vid_fid)
+        reply_vid_fid = reply_ctx.get("video_file_id") if reply_ctx else None
+        if reply_vid_fid and reply_ctx:
+            record_recent_video_file_id(chat_id, reply_ctx["message_id"], reply_vid_fid)
+
+        direct_vid_fid = msg_vid_fid or reply_vid_fid
+        attached_video = (
+            await _download_telegram_video(context.bot, direct_vid_fid)
+            if direct_vid_fid
+            else None
+        )
+
         async def _fetch_chat_msg_image(target_msg_id: int) -> tuple[bytes, str] | None:
             fid_map = await db.get_message_media_file_ids(chat_id, [target_msg_id])
             fid = fid_map.get(int(target_msg_id))
             if not fid:
                 return None
             return await _download_telegram_image(context.bot, fid)
+
+        async def _fetch_chat_msg_video(target_msg_id: int | None) -> bytes | None:
+            if target_msg_id is not None:
+                vfid = RECENT_VIDEO_CACHE.get((int(chat_id), int(target_msg_id)))
+                if vfid:
+                    return await _download_telegram_video(context.bot, vfid)
+                return None
+            latest_v = LATEST_CHAT_VIDEO.get(int(chat_id))
+            if latest_v:
+                return await _download_telegram_video(context.bot, latest_v[1])
+            return None
 
         ai_res = await asyncio.wait_for(
             memory_engine.answer_ask_query(
@@ -282,11 +335,14 @@ async def _run_ask_flow(
                 question=question,
                 reply_context=reply_ctx,
                 attached_images=attached_images if attached_images else None,
+                attached_video=attached_video,
                 fetch_message_image=_fetch_chat_msg_image,
+                fetch_message_video=_fetch_chat_msg_video,
                 on_image_action=_switch_to_upload_photo,
                 on_gif_action=_switch_to_upload_animation,
+                on_video_action=_switch_to_upload_animation,
             ),
-            timeout=165.0,
+            timeout=420.0,
         )
 
         _stop_action_pulse()
@@ -295,11 +351,89 @@ async def _run_ask_flow(
         gen_img_bytes: bytes | None = ai_res.get("image_bytes")
         gen_img_mime: str = ai_res.get("image_mime") or "image/png"
         media_kind: str = ai_res.get("media_kind") or (
-            "animation" if gen_img_mime == "image/gif" else "photo"
+            "video"
+            if gen_img_mime.startswith("video/")
+            else ("animation" if gen_img_mime == "image/gif" else "photo")
         )
+        is_video_output = bool(gen_img_bytes and media_kind == "video")
         is_gif_output = bool(gen_img_bytes and media_kind == "animation")
 
-        if is_gif_output:
+        if is_video_output:
+            vid_w = ai_res.get("width")
+            vid_h = ai_res.get("height")
+            vid_dur = ai_res.get("duration")
+            thumb_raw: bytes | None = ai_res.get("thumbnail_bytes")
+            try:
+                await context.bot.send_chat_action(
+                    chat_id=chat_id,
+                    action=ChatAction.UPLOAD_VIDEO,
+                    message_thread_id=action_thread_id,
+                )
+            except Exception:
+                pass
+
+            if len(answer_text) <= MessageLimit.CAPTION_LENGTH:
+                try:
+                    sent_msg = await context.bot.send_video(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        video=io.BytesIO(gen_img_bytes),
+                        filename="symm_video.mp4",
+                        width=vid_w,
+                        height=vid_h,
+                        duration=vid_dur,
+                        thumbnail=io.BytesIO(thumb_raw) if thumb_raw else None,
+                        supports_streaming=True,
+                        caption=answer_text or None,
+                        parse_mode=ParseMode.HTML if answer_text else None,
+                        reply_to_message_id=update.message.message_id,
+                    )
+                except BadRequest as html_err:
+                    logger.warning("HTML caption fallback in /ask video (%s)", html_err)
+                    plain_cap = html.unescape(re.sub(r"<[^>]+>", "", answer_text)).strip()
+                    sent_msg = await context.bot.send_video(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        video=io.BytesIO(gen_img_bytes),
+                        filename="symm_video.mp4",
+                        width=vid_w,
+                        height=vid_h,
+                        duration=vid_dur,
+                        thumbnail=io.BytesIO(thumb_raw) if thumb_raw else None,
+                        supports_streaming=True,
+                        caption=plain_cap[: MessageLimit.CAPTION_LENGTH] or None,
+                        reply_to_message_id=update.message.message_id,
+                    )
+            else:
+                sent_msg = await context.bot.send_video(
+                    chat_id=chat_id,
+                    message_thread_id=send_thread_id,
+                    video=io.BytesIO(gen_img_bytes),
+                    filename="symm_video.mp4",
+                    width=vid_w,
+                    height=vid_h,
+                    duration=vid_dur,
+                    thumbnail=io.BytesIO(thumb_raw) if thumb_raw else None,
+                    supports_streaming=True,
+                    reply_to_message_id=update.message.message_id,
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        text=answer_text[:3900],
+                        parse_mode=ParseMode.HTML,
+                        reply_to_message_id=sent_msg.message_id,
+                    )
+                except BadRequest:
+                    plain_fallback = html.unescape(re.sub(r"<[^>]+>", "", answer_text))
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        message_thread_id=send_thread_id,
+                        text=plain_fallback[:3900],
+                        reply_to_message_id=sent_msg.message_id,
+                    )
+        elif is_gif_output:
             gif_w = ai_res.get("width")
             gif_h = ai_res.get("height")
             try:
@@ -465,15 +599,27 @@ async def _run_ask_flow(
                     created_at=update.message.date,
                 )
                 plain_bot_reply = html.unescape(re.sub(r"<[^>]+>", "", answer_text)).strip()
-                if is_gif_output:
+                if is_video_output:
+                    bot_archive_text = f"[Generated Video] {plain_bot_reply}".strip()
+                    bot_media_type = "video"
+                    default_tag = "[Generated Video]"
+                elif is_gif_output:
                     bot_archive_text = f"[Generated GIF] {plain_bot_reply}".strip()
                     bot_media_type = "animation"
+                    default_tag = "[Generated GIF]"
                 elif gen_img_bytes:
                     bot_archive_text = f"[Generated Image] {plain_bot_reply}".strip()
                     bot_media_type = "photo"
+                    default_tag = "[Generated Image]"
                 else:
                     bot_archive_text = plain_bot_reply
                     bot_media_type = None
+                    default_tag = ""
+
+                bot_sent_vid_fid = extract_video_file_id(sent_msg)
+                if bot_sent_vid_fid:
+                    record_recent_video_file_id(chat_id, sent_msg.message_id, bot_sent_vid_fid)
+
                 bot_sent_fid = extract_image_file_id(sent_msg)
                 bot_me = context.bot
                 await db.record_group_chat_message(
@@ -482,7 +628,7 @@ async def _run_ask_flow(
                     user_id=bot_me.id,
                     sender_name=getattr(bot_me, "first_name", None) or "symm.city bot",
                     sender_username=getattr(bot_me, "username", None) or "symmcitybot",
-                    content=bot_archive_text or ("[Generated GIF]" if is_gif_output else "[Generated Image]"),
+                    content=bot_archive_text or default_tag,
                     is_bot=True,
                     reply_to_message_id=update.message.message_id,
                     thread_id=thread_id,
@@ -529,16 +675,17 @@ async def ask_cmd(update: Update, context: CallbackContext):
 
     bot_id = getattr(context.bot, "id", None)
     reply_ctx = _extract_reply_context(update, bot_id=bot_id)
-    has_direct_image = bool(
+    has_direct_media = bool(
         extract_image_file_id(update.message)
-        or (reply_ctx and reply_ctx.get("image_file_id"))
+        or extract_video_file_id(update.message)
+        or (reply_ctx and (reply_ctx.get("image_file_id") or reply_ctx.get("video_file_id")))
     )
 
     # If the user replied to a message with bare `/ask` or `/?`, treat that message as the prompt
     if not question and reply_ctx and reply_ctx.get("text"):
         question = reply_ctx["text"]
-    elif not question and has_direct_image:
-        question = "Take a look at this image and tell me what you notice!"
+    elif not question and has_direct_media:
+        question = "Take a look at this media and tell me what you notice!"
 
     if not question:
         await update.message.reply_text(

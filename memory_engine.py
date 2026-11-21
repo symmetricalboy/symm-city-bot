@@ -19,15 +19,18 @@ from gemini_service import (
     describe_images_with_neon,
     embed_texts,
     generate_json,
+    generate_omni_video_bytes,
     generate_or_edit_image_bytes,
     get_gemini_client,
     run_agentic_interaction,
 )
 from handlers.cxp import _get_member_tag_string, calculate_level
-from handlers.gif_builder import (
-    build_sprite_sheet_prompt,
-    infer_aspect_ratio_from_image_bytes,
-    slice_grid_to_gif_sync,
+from handlers.video_utils import (
+    extract_first_frame_png_sync,
+    finalize_telegram_mp4_sync,
+    infer_omni_aspect_ratio,
+    mp4_to_gif_sync,
+    prep_input_video_for_omni_sync,
 )
 
 logger = logging.getLogger(__name__)
@@ -386,8 +389,8 @@ ASK_TOOLS: list[dict[str, Any]] = [
             "existing images using Nano Banana 2.1 (`gemini-nano-banana-2.1`). Call this whenever the user "
             "asks to draw, create, render, visualize, meme-ify, edit, modify, restyle, swap, add/remove elements, "
             "or transform an attached, replied-to, or recently posted image into a static picture. "
-            "If the user wants an ANIMATED GIF or asks to animate something, call `generate_animated_gif` instead! "
-            "Do NOT call this if the user is merely asking a factual question about what is inside an attached image."
+            "If the user wants an ANIMATED GIF, call `generate_animated_gif`. If they want a VIDEO (with or without sound), "
+            "call `generate_or_edit_video`! Do NOT call this if the user is merely asking a factual question about an image."
         ),
         "parameters": {
             "type": "object",
@@ -428,10 +431,11 @@ ASK_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "name": "generate_animated_gif",
         "description": (
-            "Generate a looping ANIMATED GIF (from scratch OR by animating an attached, replied-to, or recent chat image) "
-            "by rendering a multi-frame sequential sprite-sheet grid in a single Nano Banana 2.1 image and slicing/stabilizing "
-            "it into an animated GIF with Pillow. Call this whenever the user asks for a GIF, animation, animated meme/reaction, "
-            "looping clip, sprite animation, or asks to animate / bring to life an existing image!"
+            "Generate a fluid, high-framerate ANIMATED GIF by taking an existing attached/replied/recent image "
+            "(or generating a crisp starting image with Nano Banana 2.1 first), animating it into a soundless 24fps "
+            "video with Gemini Omni 1.2 Flash (`gemini-omni-1.2-flash`), and converting it into an inline looping GIF via FFmpeg. "
+            "Call this whenever the user asks for a GIF, animated GIF, reaction GIF, looping animation, or asks to "
+            "turn an image into a GIF!"
         ),
         "parameters": {
             "type": "object",
@@ -439,54 +443,130 @@ ASK_TOOLS: list[dict[str, Any]] = [
                 "prompt": {
                     "type": "string",
                     "description": (
-                        "Detailed description of the subject, visual style, background, and clear step-by-step motion "
-                        "across the animation frames (e.g. 'cyberpunk cat DJ bobbing its head while neon equalizers pulse "
-                        "behind the turntables'). Incorporate relevant member/community details when appropriate."
+                        "Detailed motion & visual prompt describing how the scene and subject animate smoothly "
+                        "(in a continuous unbroken shot unless cuts are desired). Incorporate member/community details when relevant."
+                    ),
+                },
+                "image_prompt": {
+                    "type": "string",
+                    "description": (
+                        "When creating a brand-new GIF from scratch (`use_attached_or_replied_images=false`), describe "
+                        "the rich starting frame image to generate first with Nano Banana 2.1 before animating it."
                     ),
                 },
                 "use_attached_or_replied_images": {
                     "type": "boolean",
                     "description": (
-                        "Set true when animating, remixing, or referencing the image/GIF/sticker attached to the current "
-                        "message or replied-to message; set false when creating a brand-new GIF from scratch."
+                        "Set true when animating an image/GIF/sticker/video frame attached to the current message "
+                        "or replied-to message; set false when creating a brand-new GIF from scratch."
                     ),
                 },
                 "reference_message_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": (
-                        "Optional message_id(s) marked `[img_msg_id=...]` in the floating chat window when the "
-                        "user asks to animate an earlier image posted in chat without directly replying to it."
+                        "Optional message_id(s) marked `[img_msg_id=...]` in the floating chat window when animating "
+                        "an earlier image posted in chat without directly replying to it."
                     ),
                 },
-                "grid_size": {
-                    "type": "string",
-                    "enum": ["2x2", "3x3", "4x4"],
+                "seamless_loop": {
+                    "type": "boolean",
                     "description": (
-                        "Sprite-sheet grid layout: '3x3' (9 frames, default — best blend of resolution and smooth motion), "
-                        "'2x2' (4 frames — snappy 4-beat memes/blinks), or '4x4' (16 frames — longer fluid action)."
+                        "Set true (default) to use the starting image as both the first and final frame so the GIF "
+                        "loops seamlessly back to Frame 1 with zero jump cut; set false for one-way progressive reveals/transformations."
                     ),
                 },
-                "fps": {
+                "duration_seconds": {
                     "type": "integer",
-                    "description": "Playback speed in frames per second (4 to 14, default 8).",
-                },
-                "loop_mode": {
-                    "type": "string",
-                    "enum": ["loop", "pingpong"],
-                    "description": (
-                        "Use 'pingpong' (forward-then-reverse boomerang) for oscillating, waving, nodding, dancing, "
-                        "vibing, zooming, or expressive actions so they loop seamlessly with zero jump cut; use 'loop' "
-                        "for continuous one-way cycles like spinning, falling rain/snow, walking, or orbiting."
-                    ),
+                    "description": "GIF clip length in seconds from 3 to 8 (default 5).",
                 },
                 "aspect_ratio": {
                     "type": "string",
-                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
-                    "description": "Optional per-frame aspect ratio (omit when animating a reference image to preserve its framing, or defaults to '1:1').",
+                    "enum": ["16:9", "9:16"],
+                    "description": "Landscape '16:9' (default) or vertical '9:16' (omit when animating an existing image to match its orientation).",
                 },
             },
             "required": ["prompt", "use_attached_or_replied_images"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "generate_or_edit_video",
+        "description": (
+            "Generate, animate, edit, or extend a full HD VIDEO (with native synchronized audio, music, sound effects, "
+            "and/or spoken dialogue!) using Gemini Omni 1.2 Flash (`gemini-omni-1.2-flash`). Call this whenever the user "
+            "asks for a video, movie clip, animation with sound/music/voice, asks to animate an image into a video, "
+            "or asks to edit or extend an existing video!"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Cinematic video prompt describing visuals, camera motion (include 'In a single continuous shot' if "
+                        "no scene cuts are wanted), and explicit sound design / music / dialogue cues! "
+                        "When `mode='edit'` on an existing video, keep the instruction concise and include "
+                        "'Keep everything else the same.' unless changing the whole scene."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["create", "edit", "extend"],
+                    "description": (
+                        "'create' for new text-to-video, image-to-video, or reference-guided video; "
+                        "'edit' to modify/restyle an attached, replied-to, or recent video; "
+                        "'extend' to continue an attached, replied-to, or recent video by 3s-10s."
+                    ),
+                },
+                "use_attached_or_replied_media": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true when using an attached or replied-to photo, GIF, or video (or recent chat media); "
+                        "set false when generating a brand-new video purely from text."
+                    ),
+                },
+                "image_role": {
+                    "type": "string",
+                    "enum": ["first_frame", "first_and_last_frame", "reference"],
+                    "description": (
+                        "When `mode='create'` with image(s): 'first_frame' (default) animates starting directly from the image; "
+                        "'first_and_last_frame' interpolates between 2 images (3s-10s); 'reference' uses up to 6 images as "
+                        "character/object/style references in a new scene."
+                    ),
+                },
+                "reference_message_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional message_id(s) from the floating chat window (`[img_msg_id=...]` or video message IDs).",
+                },
+                "duration_seconds": {
+                    "type": "integer",
+                    "description": "Video duration in seconds: 3 to 15 (default 8; 3 to 10 for 'extend' or 'first_and_last_frame').",
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "enum": ["16:9", "9:16"],
+                    "description": "Landscape '16:9' (default) or vertical/portrait '9:16'.",
+                },
+                "resolution": {
+                    "type": "string",
+                    "enum": ["720p", "1080p"],
+                    "description": "'720p' HD (default, fast) or '1080p' Full HD when high resolution is requested.",
+                },
+                "include_audio": {
+                    "type": "boolean",
+                    "description": "True (default) to include synchronized sound/music/dialogue; false only if user explicitly wants a silent/muted video.",
+                },
+                "regenerate_audio": {
+                    "type": "boolean",
+                    "description": (
+                        "When `mode='edit'` on an existing video: false (default) preserves the original audio track; "
+                        "true strips the original audio first so Gemini Omni Flash generates brand-new audio from scratch."
+                    ),
+                },
+            },
+            "required": ["prompt", "use_attached_or_replied_media"],
         },
     },
     {
@@ -893,14 +973,17 @@ class MemoryEngine:
         question: str,
         reply_context: dict | None = None,
         attached_images: list[tuple[bytes, str]] | None = None,
+        attached_video: bytes | None = None,
         fetch_message_image: Callable[[int], Awaitable[tuple[bytes, str] | None]] | None = None,
+        fetch_message_video: Callable[[int | None], Awaitable[bytes | None]] | None = None,
         on_image_action: Callable[[], Awaitable[None]] | None = None,
         on_gif_action: Callable[[], Awaitable[None]] | None = None,
+        on_video_action: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """
-        Generate a context-rich, memory-grounded answer (and optional generated/edited image or animated GIF)
-        using `gemini-4-neon` + `gemini-nano-banana-2.1`.
-        Returns `{"text": html_str, "image_bytes": bytes | None, "image_mime": str, "media_kind": str, "width": int | None, "height": int | None}`.
+        Generate a context-rich, memory-grounded answer plus optional generated/edited image,
+        high-fluidity animated GIF, or full HD video with sound using `gemini-4-neon`,
+        `gemini-nano-banana-2.1`, and `gemini-omni-1.2-flash`.
         """
         # Clean accidental literal "<question>" copied from /help examples
         clean_q = re.sub(r"^\s*<question>\s*[.:,-]?\s*", "", question.strip(), flags=re.IGNORECASE).strip()
@@ -1231,78 +1314,255 @@ class MemoryEngine:
                         await on_gif_action()
                     except Exception:
                         pass
-                elif on_image_action:
+                elif on_video_action:
                     try:
-                        await on_image_action()
+                        await on_video_action()
                     except Exception:
                         pass
 
                 use_direct = bool(fn_args.get("use_attached_or_replied_images"))
                 ref_msg_ids = fn_args.get("reference_message_ids") or []
-                grid_size = fn_args.get("grid_size") or "3x3"
-                if grid_size not in ("2x2", "3x3", "4x4"):
-                    grid_size = "3x3"
-                fps = int(fn_args.get("fps") or 8)
-                loop_mode = fn_args.get("loop_mode") or "loop"
-                if loop_mode not in ("loop", "pingpong"):
-                    loop_mode = "loop"
+                seamless_loop = (
+                    True
+                    if fn_args.get("seamless_loop") is None
+                    else bool(fn_args.get("seamless_loop"))
+                )
+                dur_sec = max(3, min(8, int(fn_args.get("duration_seconds") or 5)))
 
                 ref_imgs = await _gather_ref_images(use_direct, ref_msg_ids)
-                aspect_ratio = fn_args.get("aspect_ratio")
-                if not aspect_ratio:
-                    if ref_imgs:
-                        aspect_ratio = await asyncio.to_thread(
-                            infer_aspect_ratio_from_image_bytes, ref_imgs[0][0]
-                        )
-                    else:
-                        aspect_ratio = "1:1"
+                if use_direct and not ref_imgs and attached_video:
+                    extracted = await asyncio.to_thread(
+                        extract_first_frame_png_sync, attached_video
+                    )
+                    if extracted:
+                        ref_imgs.append(extracted)
 
-                sheet_prompt = build_sprite_sheet_prompt(
-                    gif_prompt,
-                    grid_size=grid_size,
-                    loop_mode=loop_mode,
-                    has_reference_images=bool(ref_imgs),
-                )
+                req_ar = fn_args.get("aspect_ratio")
+                if req_ar in ("16:9", "9:16"):
+                    omni_ar = req_ar
+                elif ref_imgs:
+                    omni_ar = await asyncio.to_thread(
+                        infer_omni_aspect_ratio, ref_imgs[0][0]
+                    )
+                else:
+                    omni_ar = "16:9"
 
-                gen_res = await generate_or_edit_image_bytes(
-                    sheet_prompt,
-                    reference_images=ref_imgs if ref_imgs else None,
-                    aspect_ratio=aspect_ratio,
+                # Step 1: Resolve starting keyframe image (use provided image OR generate with Nano Banana 2.1)
+                if ref_imgs:
+                    start_frame = ref_imgs[0]
+                else:
+                    keyframe_prompt = (fn_args.get("image_prompt") or gif_prompt).strip()
+                    kf_res = await generate_or_edit_image_bytes(
+                        keyframe_prompt,
+                        aspect_ratio=omni_ar,
+                    )
+                    kf_bytes = kf_res.get("image_bytes")
+                    if not kf_bytes:
+                        return {
+                            "generated": False,
+                            "error": kf_res.get("model_text")
+                            or "Failed generating starting keyframe image for GIF.",
+                        }
+                    start_frame = (kf_bytes, kf_res.get("mime_type") or "image/png")
+
+                # Step 2: Animate the starting image into a soundless 24fps video with Gemini Omni 1.2 Flash
+                silent_motion_prompt = (
+                    f"{gif_prompt}. In a single continuous unbroken shot, no scene cuts. "
+                    f"Silent animation only — no dialogue, no background music, no sound effects."
                 )
-                sheet_bytes = gen_res.get("image_bytes")
-                if not sheet_bytes:
+                vid_res = await generate_omni_video_bytes(
+                    silent_motion_prompt,
+                    aspect_ratio=omni_ar,
+                    duration_sec=dur_sec,
+                    resolution="720p",
+                    first_frame=start_frame,
+                    loop_same_first_last=seamless_loop,
+                    mode="create",
+                )
+                raw_mp4 = vid_res.get("video_bytes")
+                if not raw_mp4:
                     return {
                         "generated": False,
-                        "error": gen_res.get("model_text") or "Image model did not return a sprite sheet.",
+                        "error": vid_res.get("model_text")
+                        or "Gemini Omni Flash did not return video content for GIF conversion.",
                     }
 
+                # Step 3: Convert soundless MP4 into a fluid 256-color palette-optimized GIF via FFmpeg
                 try:
                     gif_res = await asyncio.to_thread(
-                        slice_grid_to_gif_sync,
-                        sheet_bytes,
-                        grid_size=grid_size,
-                        fps=fps,
-                        loop_mode=loop_mode,
+                        mp4_to_gif_sync,
+                        raw_mp4,
+                        fps=16,
+                        max_long_side=512,
                     )
                 except Exception as gif_err:
-                    logger.error("Failed slicing sprite sheet into GIF: %s", gif_err, exc_info=True)
-                    return {"generated": False, "error": f"GIF processing failed: {gif_err}"}
+                    logger.error("Failed converting MP4 to GIF: %s", gif_err, exc_info=True)
+                    return {"generated": False, "error": f"GIF conversion failed: {gif_err}"}
 
                 generated_media["bytes"] = gif_res["gif_bytes"]
                 generated_media["mime"] = "image/gif"
                 generated_media["kind"] = "animation"
                 generated_media["width"] = gif_res["width"]
                 generated_media["height"] = gif_res["height"]
+                generated_media["duration"] = dur_sec
+                generated_media["thumbnail_bytes"] = None
                 return {
                     "generated": True,
                     "media_type": "animated_gif",
-                    "grid_size": grid_size,
-                    "unique_frames": gif_res["unique_frames"],
-                    "loop_mode": loop_mode,
-                    "fps": fps,
-                    "reference_image_count": len(ref_imgs),
+                    "frame_count": gif_res["frame_count"],
+                    "duration_seconds": dur_sec,
+                    "seamless_loop": seamless_loop,
+                    "used_existing_image": bool(ref_imgs),
                     "note": (
-                        "Animated GIF is ready and will be sent directly as an autoplaying Telegram GIF! "
+                        "Fluid animated GIF is ready and will be sent directly as an autoplaying Telegram GIF! "
+                        "Write a short, witty, natural caption (under 900 characters) to go with it."
+                    ),
+                }
+
+            if fn_name == "generate_or_edit_video":
+                vid_prompt = (fn_args.get("prompt") or "").strip()
+                if not vid_prompt:
+                    return {"generated": False, "error": "Empty video prompt."}
+
+                if on_video_action:
+                    try:
+                        await on_video_action()
+                    except Exception:
+                        pass
+                elif on_gif_action:
+                    try:
+                        await on_gif_action()
+                    except Exception:
+                        pass
+
+                mode = (fn_args.get("mode") or "create").lower()
+                if mode not in ("create", "edit", "extend"):
+                    mode = "create"
+
+                use_media = bool(fn_args.get("use_attached_or_replied_media"))
+                ref_msg_ids = fn_args.get("reference_message_ids") or []
+                image_role = (fn_args.get("image_role") or "first_frame").lower()
+                include_audio = (
+                    True
+                    if fn_args.get("include_audio") is None
+                    else bool(fn_args.get("include_audio"))
+                )
+                regenerate_audio = bool(fn_args.get("regenerate_audio"))
+                resolution = (fn_args.get("resolution") or "720p").lower()
+                if resolution not in ("720p", "1080p"):
+                    resolution = "720p"
+
+                dur_sec = int(fn_args.get("duration_seconds") or 8)
+
+                # Resolve source video if editing or extending
+                src_vid_bytes: bytes | None = None
+                if mode in ("edit", "extend"):
+                    if attached_video:
+                        src_vid_bytes = attached_video
+                    elif fetch_message_video:
+                        if ref_msg_ids:
+                            for r_mid in ref_msg_ids[:3]:
+                                src_vid_bytes = await fetch_message_video(int(r_mid))
+                                if src_vid_bytes:
+                                    break
+                        if not src_vid_bytes:
+                            src_vid_bytes = await fetch_message_video(None)
+
+                    if not src_vid_bytes:
+                        # Fallback if user asked to "edit/extend" what was actually a static image
+                        mode = "create"
+                    else:
+                        strip_in_audio = (
+                            (mode == "edit" and regenerate_audio) or (not include_audio)
+                        )
+                        src_vid_bytes = await asyncio.to_thread(
+                            prep_input_video_for_omni_sync,
+                            src_vid_bytes,
+                            max_duration_sec=15,
+                            strip_audio=strip_in_audio,
+                        )
+
+                # Resolve any attached / referenced images
+                ref_imgs: list[tuple[bytes, str]] = []
+                if use_media or ref_msg_ids:
+                    # Avoid grabbing latest chat image if we already matched an explicit source video without image refs
+                    if not (src_vid_bytes and not attached_images and not ref_msg_ids):
+                        ref_imgs = await _gather_ref_images(use_media, ref_msg_ids)
+
+                req_ar = fn_args.get("aspect_ratio")
+                if req_ar in ("16:9", "9:16"):
+                    omni_ar = req_ar
+                elif ref_imgs:
+                    omni_ar = await asyncio.to_thread(
+                        infer_omni_aspect_ratio, ref_imgs[0][0]
+                    )
+                else:
+                    omni_ar = "16:9"
+
+                first_frame: tuple[bytes, str] | None = None
+                last_frame: tuple[bytes, str] | None = None
+                extra_refs: list[tuple[bytes, str]] | None = None
+
+                if mode in ("edit", "extend"):
+                    extra_refs = ref_imgs[:6] if ref_imgs else None
+                elif ref_imgs:
+                    if image_role == "first_and_last_frame" and len(ref_imgs) >= 2:
+                        first_frame = ref_imgs[0]
+                        last_frame = ref_imgs[1]
+                        extra_refs = ref_imgs[2:8] if len(ref_imgs) > 2 else None
+                    elif image_role == "reference":
+                        extra_refs = ref_imgs[:6]
+                    else:
+                        first_frame = ref_imgs[0]
+                        extra_refs = ref_imgs[1:7] if len(ref_imgs) > 1 else None
+
+                effective_prompt = vid_prompt
+                if not include_audio:
+                    effective_prompt = (
+                        f"{effective_prompt}. Silent video — no dialogue, no music, no sound effects."
+                    )
+
+                omni_res = await generate_omni_video_bytes(
+                    effective_prompt,
+                    aspect_ratio=omni_ar,
+                    duration_sec=dur_sec,
+                    resolution=resolution,
+                    first_frame=first_frame,
+                    last_frame=last_frame,
+                    reference_images=extra_refs,
+                    source_video=src_vid_bytes,
+                    mode=mode,
+                )
+                raw_mp4 = omni_res.get("video_bytes")
+                if not raw_mp4:
+                    return {
+                        "generated": False,
+                        "error": omni_res.get("model_text")
+                        or "Gemini Omni Flash did not return a video.",
+                    }
+
+                mp4_info = await asyncio.to_thread(
+                    finalize_telegram_mp4_sync,
+                    raw_mp4,
+                    strip_audio=not include_audio,
+                )
+
+                generated_media["bytes"] = mp4_info["video_bytes"]
+                generated_media["mime"] = "video/mp4"
+                generated_media["kind"] = "video"
+                generated_media["width"] = mp4_info["width"]
+                generated_media["height"] = mp4_info["height"]
+                generated_media["duration"] = mp4_info["duration"] or omni_res.get("duration_sec")
+                generated_media["thumbnail_bytes"] = mp4_info["thumbnail_bytes"]
+                return {
+                    "generated": True,
+                    "media_type": "video_mp4",
+                    "mode": mode,
+                    "duration_seconds": generated_media["duration"],
+                    "resolution": resolution,
+                    "has_audio": include_audio,
+                    "note": (
+                        "HD video is ready and will be streamed inline in Telegram! "
                         "Write a short, witty, natural caption (under 900 characters) to go with it."
                     ),
                 }
@@ -1332,14 +1592,22 @@ class MemoryEngine:
             "kind": "photo",
             "width": None,
             "height": None,
+            "duration": None,
+            "thumbnail_bytes": None,
         }
 
-        attached_note = ""
+        attached_parts: list[str] = []
         if attached_images:
-            attached_note = (
-                f"\n[Visual Context: {len(attached_images)} image(s) from the user's message / replied-to message "
-                f"are attached directly to your vision input and ready for inspection, `generate_or_edit_image`, or `generate_animated_gif`!]\n"
+            attached_parts.append(
+                f"{len(attached_images)} image(s) attached directly to your vision input"
             )
+        if attached_video:
+            attached_parts.append(
+                "1 video attached/replied-to and ready for `generate_or_edit_video` (`mode='edit'` or `mode='extend'`, `use_attached_or_replied_media=true`)"
+            )
+        attached_note = (
+            f"\n[Media Context: {'; '.join(attached_parts)}!]\n" if attached_parts else ""
+        )
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         system_instruction = f"""You are <b>symm.city bot</b>, the resident AI companion and community brain for the <b>symm.city</b> Telegram group chat (<code>@symmcity</code> / https://symm.city), created by <b>symm</b> (<code>@symmetricalboy</code> / Dylan).
@@ -1352,14 +1620,17 @@ PERSONA & VIBE:
 - Whenever someone asks about an older conversation, specific quote, first message, or a member detail not already shown below, proactively call `search_chat_history` or `get_member_memories` before answering.
 - Whenever someone shares a new durable personal fact or asks you to remember something, call `remember_fact` so it persists forever.
 
-IMAGE GENERATION, EDITING, ANIMATED GIFS & VISION:
-- You have native multimodal vision PLUS `generate_or_edit_image` (static images) AND `generate_animated_gif` (animated GIFs rendered via Nano Banana 2.1 sprite grids + Pillow).
-- Contextually decide what the user wants:
-  • If they ask for a **GIF, animation, animated meme/reaction, looping clip, sprite animation**, OR ask to **animate / bring to life** an attached, replied-to, or recent chat image (`[img_msg_id=...]`) -> call `generate_animated_gif`! Pick `loop_mode="pingpong"` for waving/nodding/dancing/vibing/zooming/expressive actions and `loop_mode="loop"` for continuous cycles like spinning, falling rain, or walking.
-  • If they ask to create, draw, render, imagine, illustrate, or generate a **static** image/meme/scene -> call `generate_or_edit_image` (`use_attached_or_replied_images=false`, unless referencing an existing image).
-  • If they attach or reply to an image (or mention `[img_msg_id=...]`) and ask for a **static** edit, modification, remix, restyle, swap, or element addition/removal -> call `generate_or_edit_image` (`use_attached_or_replied_images=true` and/or `reference_message_ids=[...]`).
-  • If they attach or reply to an image and ask a question about it (e.g. "what is this?", "fix this error", "translate the text in this photo") -> inspect the attached image directly with your vision (or `inspect_chat_image` for an unattached `[img_msg_id=...]` message) and answer in text WITHOUT generating media.
-- When `generate_or_edit_image` or `generate_animated_gif` succeeds, keep your text response under 900 characters so it fits cleanly as the media caption!
+IMAGE, ANIMATED GIF, VIDEO (WITH SOUND) & VISION STUDIO:
+- You have native multimodal vision PLUS three generative media tools:
+  1. `generate_or_edit_image` (Nano Banana 2.1): Static images & static photo edits.
+  2. `generate_animated_gif` (Nano Banana 2.1 keyframe -> Gemini Omni 1.2 Flash soundless 24fps video -> FFmpeg GIF): Fluid, looping animated GIFs!
+  3. `generate_or_edit_video` (Gemini Omni 1.2 Flash): Full HD videos (`3s`–`15s`, `720p`/`1080p`) WITH native synchronized sound effects, music, ambience, and/or spoken dialogue — plus image-to-video, video editing (`mode="edit"`), and video extension (`mode="extend"`)!
+- Contextually choose the right action:
+  • If the user asks for a **GIF, animated GIF, reaction GIF, or looping GIF** (from scratch OR from an attached/replied/recent image) -> call `generate_animated_gif`!
+  • If the user asks for a **video, movie clip, animation with sound/music/dialogue**, asks to **turn an image into a video**, or asks to **edit or extend a video** -> call `generate_or_edit_video`! Describe the desired soundscape, music, SFX, or dialogue right in `prompt` (and for `mode="edit"`, keep instructions concise and include `"Keep everything else the same."` when modifying specific elements).
+  • If the user asks to draw, create, render, or edit a **static** image/photo/meme -> call `generate_or_edit_image`.
+  • If the user attaches/replies to media and asks a question about it (e.g. "what is this?", "read this error") -> inspect it with your vision (or `inspect_chat_image`) and answer in text WITHOUT generating media.
+- Whenever any media generation tool succeeds, keep your text reply under 900 characters so it fits cleanly as the caption!
 
 === CORE SYMM.CITY KNOWLEDGE ===
 {core_and_bluesky}
@@ -1426,6 +1697,8 @@ OUTPUT FORMATTING RULES (STRICT):
             "media_kind": generated_media["kind"],
             "width": generated_media["width"],
             "height": generated_media["height"],
+            "duration": generated_media["duration"],
+            "thumbnail_bytes": generated_media["thumbnail_bytes"],
         }
 
 

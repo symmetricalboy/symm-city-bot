@@ -203,6 +203,16 @@ class MemoryCache:
 MESSAGE_AUTHOR_CACHE = MemoryCache(5000)
 RATE_LIMIT_CACHE = MemoryCache(5000)
 UNLINKED_WARNING_CACHE = MemoryCache(5000)
+RECENT_VIDEO_CACHE = MemoryCache(300)
+LATEST_CHAT_VIDEO: dict[int, tuple[int, str]] = {}
+
+
+def record_recent_video_file_id(chat_id: int, message_id: int, video_file_id: str | None):
+    """Cache downloadable Telegram video `file_id` by `(chat_id, message_id)` and latest per chat."""
+    if not video_file_id:
+        return
+    RECENT_VIDEO_CACHE.put((int(chat_id), int(message_id)), str(video_file_id))
+    LATEST_CHAT_VIDEO[int(chat_id)] = (int(message_id), str(video_file_id))
 
 MESSAGE_CXP = 50
 POSITIVE_REACTION_BASE = 50
@@ -356,7 +366,7 @@ def _extract_message_content_and_media(
 
 
 def extract_image_file_id(message) -> str | None:
-    """Extract a downloadable Telegram `file_id` if `message` contains a photo, image file, GIF/animation, or sticker."""
+    """Extract a downloadable Telegram image/thumbnail `file_id` from photo, GIF, video, image doc, or sticker."""
     if not message:
         return None
     photos = getattr(message, "photo", None)
@@ -369,6 +379,11 @@ def extract_image_file_id(message) -> str | None:
         thumb = getattr(anim, "thumbnail", None)
         if thumb and getattr(thumb, "file_id", None):
             return thumb.file_id
+    vid = getattr(message, "video", None)
+    if vid:
+        thumb = getattr(vid, "thumbnail", None)
+        if thumb and getattr(thumb, "file_id", None):
+            return thumb.file_id
     doc = getattr(message, "document", None)
     if doc and (getattr(doc, "mime_type", None) or "").lower().startswith("image/"):
         return getattr(doc, "file_id", None)
@@ -379,6 +394,36 @@ def extract_image_file_id(message) -> str | None:
         thumb = getattr(sticker, "thumbnail", None)
         if thumb and getattr(thumb, "file_id", None):
             return thumb.file_id
+    return None
+
+
+def extract_video_file_id(message) -> str | None:
+    """Extract a downloadable Telegram video `file_id` (<=20MB Bot API limit) from `video`, `animation`, or `video/*` document."""
+    if not message:
+        return None
+    max_dl_bytes = 20 * 1024 * 1024
+    vid = getattr(message, "video", None)
+    if vid and getattr(vid, "file_id", None):
+        fsize = getattr(vid, "file_size", None)
+        if fsize is None or int(fsize) <= max_dl_bytes:
+            return vid.file_id
+    vnote = getattr(message, "video_note", None)
+    if vnote and getattr(vnote, "file_id", None):
+        fsize = getattr(vnote, "file_size", None)
+        if fsize is None or int(fsize) <= max_dl_bytes:
+            return vnote.file_id
+    anim = getattr(message, "animation", None)
+    if anim and getattr(anim, "file_id", None):
+        mime = (getattr(anim, "mime_type", None) or "").lower()
+        fsize = getattr(anim, "file_size", None)
+        if mime.startswith("video/") and (fsize is None or int(fsize) <= max_dl_bytes):
+            return anim.file_id
+    doc = getattr(message, "document", None)
+    if doc and getattr(doc, "file_id", None):
+        mime = (getattr(doc, "mime_type", None) or "").lower()
+        fsize = getattr(doc, "file_size", None)
+        if mime.startswith("video/") and (fsize is None or int(fsize) <= max_dl_bytes):
+            return doc.file_id
     return None
 
 
@@ -578,6 +623,9 @@ async def track_message_activity(update: Update, context: CallbackContext):
         update.message, is_forum=is_forum
     )
     media_file_id = extract_image_file_id(update.message)
+    vid_file_id = extract_video_file_id(update.message)
+    if vid_file_id:
+        record_recent_video_file_id(chat_id, update.message.message_id, vid_file_id)
     msg_thread_id = getattr(update.message, "message_thread_id", None)
     msg_date = getattr(update.message, "date", None)
 

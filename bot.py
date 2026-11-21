@@ -211,8 +211,8 @@ def main() -> None:
     # Dedicated HTTPX pools + concurrent_updates so slow AI / image tasks never block fast commands
     bot_request = HTTPXRequest(
         connection_pool_size=32,
-        read_timeout=30.0,
-        write_timeout=40.0,
+        read_timeout=60.0,
+        write_timeout=90.0,
         connect_timeout=10.0,
         pool_timeout=10.0,
     )
