@@ -40,12 +40,12 @@ SYMM_CITY_KNOWLEDGE = """
 5. Be *very* symmetrical.
 
 **symm.city Bot Features:**
-- **AI Assistant (/ask <question> or reply to the bot)**: Powered by `gemini-4-neon` with a 250-message floating group chat context window, full chat archive search, continuous long-term member & community memories, and symm's Bluesky post archive. Replying directly to any message from the bot continues the AI conversation automatically.
+- **AI Assistant (/ask, /?, /ai, /chat, /symm, /bot — or reply to the bot)**: Powered by `gemini-4-neon` with a 250-message floating group chat context window, full chat archive search, and continuous long-term member & community memories. Replying directly to any message from the bot continues the AI conversation automatically.
 - **CXP System (Community XP)**: Earn 50 CXP per chat message (1 min cooldown). Positive emoji reactions give +50 CXP; negative emoji reactions give -50 CXP. Higher-level members have higher reaction multipliers!
 - **Level Titles**: Budding Symmetry (1-4), Bilateral Balance (5-9), Rotational Harmony (10-19), Crystalline Order (20-29), Exquisitely Symmetrical (30-39), Supersymmetric (40-49), Very Symmetrical (50-59), Pure Symmetry (60+).
-- **CXP Commands**: `/level` (view stats & rank), `/history` (view CXP history charts, high/low points, and breakdowns across messages, reactions, gambling, stealing, trivia, and admin gives for any user or timeframe), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown), `/gamble <amount>` (5-line CXP slot machine, 1hr cooldown), `/question` (DM bot to create CXP trivia questions) & `/answer <guess>` (answer active trivia).
-- **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk`, `/el`, `/sk`, `/tr`, `/fa`, `/id`, `/hi`, `/da`, `/ja`, `/ar`, or `/translate` for an interactive menu.
-- **Time Zone Commands**: `/settime <location>` (save your time zone), `/time <location | @username>` (check current time anywhere or for another member; defaults to symm.city time).
+- **CXP Commands & Shorthand Aliases**: `/level` (`/lvl`, `/xp`, `/cxp`, `/stats`, `/rank`, `/bal`, `/me`), `/history` (`/h`, `/hist`, `/chart`, `/charts`, `/graph`, `/ledger`, `/pnl`), `/leaderboard` (`/lb`, `/top`, `/ranks`, `/leaders`), `/contest` (`/event`, `/tourney`), `/steal` (`/s`, `/rob`, `/yoink`, `/heist`, `/mug`), `/gamble <amount|all>` (`/g`, `/bet`, `/slots`, `/slot`, `/spin`), `/question` (`/trivia`, `/quiz`, `/q`) & `/answer <guess>` (`/ans`, `/guess`, `/solve`, `/a`), `/cancel` (`/abort`).
+- **Translation Commands**: Quick translation with `/en`, `/es`, `/fr`, `/de`, `/it`, `/nl`, `/pt`, `/ru`, `/uk` (`/ua`), `/el` (`/gr`), `/sk`, `/tr`, `/fa` (`/farsi`), `/id`, `/hi`, `/da` (`/dr`), `/ja` (`/jp`), `/ar`, or `/translate` (`/tl`) for an interactive menu.
+- **Time Zone & Utility Commands**: `/settime <location>` (`/settz`, `/timezone`, `/setloc`), `/time [location | @username]` (`/tz`, `/clock`, `/now`), `/help` (`/info`, `/about`), `/commands` (`/cmds`, `/cmd`, `/aliases`), `/rules` (`/rule`, `/guidelines`), `/ping` (`/status`, `/latency`, `/pong`), `/setchannel` (`/linkchannel`).
 - **Moderation & Alerts**: Mention `@admin` in the group to ping all administrators. Moderation tools include `/mute`, `/unmute`, `/kick`, `/ban`.
 - **Channel Post Drafting**: Authorized channel admins can use `/draft` in DM to format and preview posts with custom URL buttons.
 """
@@ -72,27 +72,15 @@ class BlueskyPostArchive:
         return re.findall(r"\w+", text.lower())
 
     def _find_json_path(self) -> Path | None:
-        """Find the Bluesky posts JSON file in standard locations."""
-        filename = "symmetricalboy.com_posts_20260822_224732.json"
+        """Load an optional Bluesky posts JSON file if BLUESKY_POSTS_JSON is configured."""
         custom_path = os.getenv("BLUESKY_POSTS_JSON")
         if custom_path and Path(custom_path).exists():
             return Path(custom_path)
-
-        candidates = [
-            Path(filename),
-            Path(__file__).parent / filename,
-            Path(__file__).parent.parent / filename,
-            Path.cwd() / filename,
-        ]
-        for p in candidates:
-            if p.exists():
-                return p
         return None
 
     def _load_posts(self):
         json_path = self._find_json_path()
         if not json_path:
-            logger.warning("Bluesky post history JSON not found. Search will be inactive.")
             return
 
         try:

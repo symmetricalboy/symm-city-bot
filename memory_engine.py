@@ -592,8 +592,12 @@ class MemoryEngine:
                         ("🎰", "⏳", "📊 Statistics", "🏆 ", "⚠️ Unlinked")
                     )
                 )
-                and not (m.get("content") or "").strip().startswith(
-                    ("/gamble", "/steal", "/level", "/leaderboard", "/history", "/ping")
+                and not (
+                    re.match(
+                        r"^/(gamble|g|bet|slots|slot|spin|steal|s|rob|yoink|heist|mug|level|lvl|xp|cxp|stats|rank|bal|balance|me|leaderboard|lb|top|ranks|leaders|history|h|hist|chart|charts|graph|ledger|pnl|ping|status|latency|pong)(\s|$|@)",
+                        (m.get("content") or "").strip(),
+                        flags=re.IGNORECASE,
+                    )
                 )
             ]
 
@@ -1021,7 +1025,7 @@ PERSONA & VIBE:
 - Whenever someone asks about an older conversation, specific quote, first message, or a member detail not already shown below, proactively call `search_chat_history` or `get_member_memories` before answering.
 - Whenever someone shares a new durable personal fact or asks you to remember something, call `remember_fact` so it persists forever.
 
-=== CORE SYMM.CITY & BLUESKY ARCHIVE CONTEXT ===
+=== CORE SYMM.CITY KNOWLEDGE ===
 {core_and_bluesky}
 
 === FOCUSED MEMBER PROFILES ===

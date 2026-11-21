@@ -1135,13 +1135,15 @@ def get_question_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler(
-                "question", question_start_dm, filters=filters.ChatType.PRIVATE
+                ["question", "trivia", "quiz", "q"],
+                question_start_dm,
+                filters=filters.ChatType.PRIVATE,
             ),
             CommandHandler(
                 "start",
                 question_start_dm,
                 filters=filters.ChatType.PRIVATE
-                & filters.Regex(r"^/start(?:@\w+)?\s+question\s*$"),
+                & filters.Regex(r"^/start(?:@\w+)?\s+(?:question|trivia)\s*$"),
             ),
         ],
         states={
@@ -1181,7 +1183,9 @@ def get_question_conversation_handler() -> ConversationHandler:
         },
         fallbacks=[
             CommandHandler(
-                "cancel", cancel_question_draft, filters=filters.ChatType.PRIVATE
+                ["cancel", "abort"],
+                cancel_question_draft,
+                filters=filters.ChatType.PRIVATE,
             ),
             MessageHandler(
                 filters.ChatType.PRIVATE & ~filters.TEXT & ~filters.COMMAND,

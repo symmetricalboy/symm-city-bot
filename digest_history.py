@@ -1176,9 +1176,7 @@ async def run_digestion(export_path: Path, llm_digest: bool = False):
 
 
 def main():
-    default_export = (
-        Path(__file__).resolve().parent.parent / "chat export 11-20-26" / "result.json"
-    )
+    default_export = Path(__file__).resolve().parent / "result.json"
     parser = argparse.ArgumentParser(
         description="Ingest Telegram chat export and populate symm.city bot's long-term memory."
     )

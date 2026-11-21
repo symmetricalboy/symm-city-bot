@@ -265,8 +265,8 @@ async def ask_cmd(update: Update, context: CallbackContext):
 
     if not question:
         await update.message.reply_text(
-            "Please provide a question after `/ask` (or reply to any message from me directly!), e.g.:\n"
-            "`/ask What's everyone been talking about today?`",
+            "Please provide a question after `/ask` or `/?` (or reply to any message from me directly!), e.g.:\n"
+            "`/? What's everyone been talking about today?`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return

@@ -1683,7 +1683,7 @@ class Database:
                               OR content LIKE '🇮🇷 [FA]%'
                           )
                       )
-                      AND content !~ '^/(gamble|steal|level|leaderboard|history|ping|checkid)([[:space:]]|$|@)'
+                      AND content !~ '^/(gamble|g|bet|slots|slot|spin|steal|s|rob|yoink|heist|mug|level|lvl|xp|cxp|stats|rank|bal|balance|me|leaderboard|lb|top|ranks|leaders|history|h|hist|chart|charts|graph|ledger|pnl|ping|status|latency|pong|checkid|uid|whois)([[:space:]]|$|@)'
                     ORDER BY created_at DESC, message_id DESC
                     LIMIT $2
                     """,

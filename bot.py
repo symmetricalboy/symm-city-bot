@@ -128,20 +128,26 @@ async def auth_middleware(update: Update, context) -> None:
             message_text = update.message.text.lower() if update.message and update.message.text else ""
             callback_data = update.callback_query.data if update.callback_query and update.callback_query.data else ""
             in_question_flow = bool(context.user_data and context.user_data.get("in_question_flow"))
+            first_cmd = (
+                message_text.split()[0].split("@")[0] if message_text else ""
+            )
             if (
                 message_text.startswith("/start setchannel")
-                or message_text.startswith("/setchannel")
+                or message_text.startswith("/start linkchannel")
+                or first_cmd in ("/setchannel", "/linkchannel")
                 or message_text.startswith("/start question")
-                or message_text.startswith("/question")
-                or message_text.startswith("/cancel")
+                or message_text.startswith("/start trivia")
+                or first_cmd in ("/question", "/trivia", "/quiz", "/q", "/cancel", "/abort")
                 or in_question_flow
                 or callback_data.startswith("qconfirm_")
             ):
-                # We allow users to use the bot in DM for channel linking
+                # We allow users to use the bot in DM for channel linking and trivia creation
                 pass
             else:
                 if update.message:
-                    await update.message.reply_text("This bot does not provide any user facing functionality via direct message except for linking channels (/setchannel) and submitting trivia questions (/question).")
+                    await update.message.reply_text(
+                        "This bot does not provide any user facing functionality via direct message except for linking channels (/setchannel) and submitting trivia questions (/question or /trivia)."
+                    )
                 raise ApplicationHandlerStop()
 
     if chat_type in ("group", "supergroup"):
@@ -229,31 +235,71 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(verify_user, pattern=r"^verify_"))
     application.add_handler(CallbackQueryHandler(translate_callback, pattern=r"^tr_"))
 
+    # Telegram does not emit a bot_command entity for punctuation commands like `/?`,
+    # so we define a dedicated filter for `/?` and exclude it from generic non-command handlers.
+    ask_qmark_filter = filters.Regex(r"^/\?(?:@\w+)?(?:\s|$)") | filters.CaptionRegex(
+        r"^/\?(?:@\w+)?(?:\s|$)"
+    )
+
     # CXP Handlers
     application.add_handler(
         MessageHandler(
-            filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
+            filters.ALL
+            & ~filters.COMMAND
+            & ~ask_qmark_filter
+            & ~filters.StatusUpdate.ALL,
             track_message_activity,
         ),
         group=1,
     )
     application.add_handler(MessageReactionHandler(evaluate_reaction))
-    application.add_handler(CommandHandler("level", user_stats_cmd))
-    application.add_handler(CommandHandler("history", history_cmd))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_cmd))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("commands", commands_cmd))
-    application.add_handler(CommandHandler("rules", rules_cmd))
-    application.add_handler(CommandHandler("give", give_cxp_cmd))
-    application.add_handler(CommandHandler("checkid", get_id_cmd))
+    application.add_handler(
+        CommandHandler(
+            ["level", "lvl", "xp", "cxp", "stats", "rank", "bal", "balance", "me"],
+            user_stats_cmd,
+        )
+    )
+    application.add_handler(
+        CommandHandler(
+            ["history", "h", "hist", "chart", "charts", "graph", "ledger", "pnl"],
+            history_cmd,
+        )
+    )
+    application.add_handler(
+        CommandHandler(
+            ["leaderboard", "lb", "top", "ranks", "leaders"],
+            leaderboard_cmd,
+        )
+    )
+    application.add_handler(CommandHandler(["help", "info", "about"], help_cmd))
+    application.add_handler(
+        CommandHandler(["commands", "cmds", "cmd", "aliases"], commands_cmd)
+    )
+    application.add_handler(
+        CommandHandler(["rules", "rule", "guidelines"], rules_cmd)
+    )
+    application.add_handler(CommandHandler(["give", "grant", "award"], give_cxp_cmd))
+    application.add_handler(CommandHandler(["checkid", "uid", "whois"], get_id_cmd))
     application.add_handler(CommandHandler("setadmin", set_admin_cmd))
-    application.add_handler(CommandHandler("steal", steal_cxp_cmd))
-    application.add_handler(CommandHandler("gamble", gamble_cmd))
-    application.add_handler(CommandHandler("question", question_group_cmd))
-    application.add_handler(CommandHandler("answer", answer_cmd))
-    application.add_handler(CommandHandler("cancel", cancel_question_cmd))
+    application.add_handler(
+        CommandHandler(["steal", "s", "rob", "yoink", "heist", "mug"], steal_cxp_cmd)
+    )
+    application.add_handler(
+        CommandHandler(["gamble", "g", "bet", "slots", "slot", "spin"], gamble_cmd)
+    )
+    application.add_handler(
+        CommandHandler(["question", "trivia", "quiz", "q"], question_group_cmd)
+    )
+    application.add_handler(
+        CommandHandler(["answer", "ans", "guess", "solve", "a"], answer_cmd)
+    )
+    application.add_handler(
+        CommandHandler(["cancel", "abort"], cancel_question_cmd)
+    )
     application.add_handler(CommandHandler("setcontest", setcontest_cmd))
-    application.add_handler(CommandHandler("contest", contest_cmd))
+    application.add_handler(
+        CommandHandler(["contest", "event", "tourney"], contest_cmd)
+    )
     application.add_handler(CommandHandler("syncperms", syncperms_cmd))
 
     # Translation Handlers
@@ -262,21 +308,23 @@ def main() -> None:
     application.add_handler(CommandHandler("id", translate_id_cmd))
     application.add_handler(CommandHandler("ru", translate_ru_cmd))
     application.add_handler(CommandHandler("es", translate_es_cmd))
-    application.add_handler(CommandHandler("fa", translate_fa_cmd))
+    application.add_handler(CommandHandler(["fa", "farsi", "persian"], translate_fa_cmd))
     application.add_handler(CommandHandler("tr", translate_tr_cmd))
     application.add_handler(CommandHandler("fr", translate_fr_cmd))
-    application.add_handler(CommandHandler("uk", translate_uk_cmd))
+    application.add_handler(CommandHandler(["uk", "ua"], translate_uk_cmd))
     application.add_handler(CommandHandler("nl", translate_nl_cmd))
-    application.add_handler(CommandHandler("el", translate_el_cmd))
+    application.add_handler(CommandHandler(["el", "gr", "greek"], translate_el_cmd))
     application.add_handler(CommandHandler("sk", translate_sk_cmd))
     application.add_handler(CommandHandler("de", translate_de_cmd))
     application.add_handler(CommandHandler("it", translate_it_cmd))
     application.add_handler(CommandHandler("hi", translate_hi_cmd))
     application.add_handler(CommandHandler("da", translate_da_cmd))
     application.add_handler(CommandHandler("dr", translate_dr_cmd))
-    application.add_handler(CommandHandler("ja", translate_ja_cmd))
+    application.add_handler(CommandHandler(["ja", "jp"], translate_ja_cmd))
     application.add_handler(CommandHandler("ar", translate_ar_cmd))
-    application.add_handler(CommandHandler("translate", translate_interactive_cmd))
+    application.add_handler(
+        CommandHandler(["translate", "tl"], translate_interactive_cmd)
+    )
 
     # Moderation Handlers
     application.add_handler(CommandHandler("mute", mute_cmd))
@@ -284,27 +332,39 @@ def main() -> None:
     application.add_handler(CommandHandler("kick", kick_cmd))
     application.add_handler(CommandHandler("ban", ban_cmd))
 
-    # AI Chat (/ask command + direct replies to anything the bot says in group chats)
-    application.add_handler(CommandHandler("ask", ask_cmd))
+    # AI Chat (/ask, /?, aliases, and direct replies to anything the bot says in group chats)
+    application.add_handler(
+        CommandHandler(["ask", "ai", "chat", "symm", "bot"], ask_cmd)
+    )
+    application.add_handler(MessageHandler(ask_qmark_filter, ask_cmd))
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS
             & filters.REPLY
             & ~filters.COMMAND
+            & ~ask_qmark_filter
             & ~filters.StatusUpdate.ALL,
             reply_to_bot_cmd,
         )
     )
 
     # Time Features
-    application.add_handler(CommandHandler("time", time_cmd))
-    application.add_handler(CommandHandler("settime", settime_cmd))
+    application.add_handler(
+        CommandHandler(["time", "tz", "clock", "now"], time_cmd)
+    )
+    application.add_handler(
+        CommandHandler(["settime", "settz", "timezone", "setloc"], settime_cmd)
+    )
 
     # Ping Feature
-    application.add_handler(CommandHandler("ping", ping_cmd))
+    application.add_handler(
+        CommandHandler(["ping", "status", "latency", "pong"], ping_cmd)
+    )
 
     # Channel Claiming
-    application.add_handler(CommandHandler("setchannel", set_channel_cmd))
+    application.add_handler(
+        CommandHandler(["setchannel", "linkchannel"], set_channel_cmd)
+    )
 
     # Start the Bot
     PORT = int(os.environ.get("PORT", "443"))
