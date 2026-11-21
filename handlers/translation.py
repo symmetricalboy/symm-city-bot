@@ -149,9 +149,8 @@ async def _translate_message(
 
     typing_job = None
     if update.effective_chat:
-        action_thread_id = thread_id
-        if update.effective_chat.is_forum and thread_id is None:
-            action_thread_id = 1
+        is_forum = bool(getattr(update.effective_chat, "is_forum", False))
+        action_thread_id = (thread_id or 1) if is_forum else None
 
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id,
@@ -695,9 +694,8 @@ async def translate_callback(update: Update, context: CallbackContext):
 
     typing_job = None
     if update.effective_chat:
-        action_thread_id = thread_id
-        if update.effective_chat.is_forum and thread_id is None:
-            action_thread_id = 1
+        is_forum = bool(getattr(update.effective_chat, "is_forum", False))
+        action_thread_id = (thread_id or 1) if is_forum else None
 
         try:
             await context.bot.send_chat_action(

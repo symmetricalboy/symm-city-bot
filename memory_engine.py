@@ -823,6 +823,7 @@ class MemoryEngine:
         reply_context: dict | None = None,
         attached_images: list[tuple[bytes, str]] | None = None,
         fetch_message_image: Callable[[int], Awaitable[tuple[bytes, str] | None]] | None = None,
+        on_image_action: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """
         Generate a context-rich, memory-grounded answer (and optional generated/edited image)
@@ -1085,6 +1086,12 @@ class MemoryEngine:
                 img_prompt = (fn_args.get("prompt") or "").strip()
                 if not img_prompt:
                     return {"generated": False, "error": "Empty image prompt."}
+
+                if on_image_action:
+                    try:
+                        await on_image_action()
+                    except Exception:
+                        pass
 
                 use_direct = bool(fn_args.get("use_attached_or_replied_images"))
                 ref_msg_ids = fn_args.get("reference_message_ids") or []

@@ -17,21 +17,6 @@ from memory_engine import memory_engine
 logger = logging.getLogger(__name__)
 
 
-async def _typing_indicator_job(context: CallbackContext):
-    """Job to continually send typing indicator while Gemini 4 Neon / Nano Banana works."""
-    chat_id = context.job.data.get("chat_id")
-    message_thread_id = context.job.data.get("message_thread_id")
-
-    try:
-        await context.bot.send_chat_action(
-            chat_id=chat_id,
-            action=ChatAction.TYPING,
-            message_thread_id=message_thread_id,
-        )
-    except Exception as e:
-        logger.warning("Failed to send typing action: %s", e)
-
-
 async def _delete_messages_job(context: CallbackContext):
     """Job to delete messages after a delay."""
     chat_id = context.job.data.get("chat_id")
@@ -205,31 +190,56 @@ async def _run_ask_flow(
         )
         return
 
+    is_forum = bool(getattr(update.effective_chat, "is_forum", False))
     thread_id = update.message.message_thread_id
+    send_thread_id = thread_id if is_forum else None
+    action_thread_id = (thread_id or 1) if is_forum else None
     chat_id = update.effective_chat.id
 
-    action_thread_id = thread_id
-    if update.effective_chat.is_forum and thread_id is None:
-        action_thread_id = 1
+    # Maintain a live Telegram chat action indicator ("typing..." -> "sending photo..." during image gen/edit).
+    # IMPORTANT: In non-forum supergroups, replying to a message sets `message.message_thread_id` to the reply-chain
+    # root ID; passing that to `send_chat_action` hides the indicator from the main group view, so `action_thread_id`
+    # MUST be `None` whenever `is_forum` is False!
+    current_action = [ChatAction.TYPING]
+    action_switch_event = asyncio.Event()
+    stop_action = False
 
-    try:
-        await context.bot.send_chat_action(
-            chat_id=chat_id,
-            action=ChatAction.TYPING,
-            message_thread_id=action_thread_id,
-        )
-    except Exception:
-        pass
+    async def _action_pulse_loop():
+        while not stop_action:
+            action_switch_event.clear()
+            sent_action = current_action[0]
+            try:
+                await context.bot.send_chat_action(
+                    chat_id=chat_id,
+                    action=sent_action,
+                    message_thread_id=action_thread_id,
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as act_err:
+                logger.debug("send_chat_action skipped: %s", act_err)
+            if stop_action or current_action[0] != sent_action:
+                continue
+            try:
+                await asyncio.wait_for(action_switch_event.wait(), timeout=4.0)
+            except asyncio.CancelledError:
+                break
+            except asyncio.TimeoutError:
+                pass
 
-    typing_job = context.job_queue.run_repeating(
-        _typing_indicator_job,
-        interval=4,
-        first=4,
-        data={
-            "chat_id": chat_id,
-            "message_thread_id": action_thread_id,
-        },
-    )
+    action_task = asyncio.create_task(_action_pulse_loop())
+    await asyncio.sleep(0)
+
+    async def _switch_to_upload_photo():
+        current_action[0] = ChatAction.UPLOAD_PHOTO
+        action_switch_event.set()
+
+    def _stop_action_pulse():
+        nonlocal stop_action
+        stop_action = True
+        action_switch_event.set()
+        if action_task and not action_task.done():
+            action_task.cancel()
 
     try:
         asker_id, asker_name, asker_username = await _resolve_asker_identity(update)
@@ -269,13 +279,12 @@ async def _run_ask_flow(
                 reply_context=reply_ctx,
                 attached_images=attached_images if attached_images else None,
                 fetch_message_image=_fetch_chat_msg_image,
+                on_image_action=_switch_to_upload_photo,
             ),
             timeout=165.0,
         )
 
-        if typing_job:
-            typing_job.schedule_removal()
-            typing_job = None
+        _stop_action_pulse()
 
         answer_text = (ai_res.get("text") or "").strip()
         gen_img_bytes: bytes | None = ai_res.get("image_bytes")
@@ -298,7 +307,7 @@ async def _run_ask_flow(
                 try:
                     sent_msg = await context.bot.send_photo(
                         chat_id=chat_id,
-                        message_thread_id=thread_id,
+                        message_thread_id=send_thread_id,
                         photo=io.BytesIO(upload_bytes),
                         filename=fname,
                         caption=answer_text or None,
@@ -310,7 +319,7 @@ async def _run_ask_flow(
                     plain_cap = html.unescape(re.sub(r"<[^>]+>", "", answer_text)).strip()
                     sent_msg = await context.bot.send_photo(
                         chat_id=chat_id,
-                        message_thread_id=thread_id,
+                        message_thread_id=send_thread_id,
                         photo=io.BytesIO(upload_bytes),
                         filename=fname,
                         caption=plain_cap[: MessageLimit.CAPTION_LENGTH] or None,
@@ -319,7 +328,7 @@ async def _run_ask_flow(
             else:
                 sent_msg = await context.bot.send_photo(
                     chat_id=chat_id,
-                    message_thread_id=thread_id,
+                    message_thread_id=send_thread_id,
                     photo=io.BytesIO(upload_bytes),
                     filename=fname,
                     reply_to_message_id=update.message.message_id,
@@ -327,7 +336,7 @@ async def _run_ask_flow(
                 try:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        message_thread_id=thread_id,
+                        message_thread_id=send_thread_id,
                         text=answer_text[:3900],
                         parse_mode=ParseMode.HTML,
                         reply_to_message_id=sent_msg.message_id,
@@ -336,7 +345,7 @@ async def _run_ask_flow(
                     plain_fallback = html.unescape(re.sub(r"<[^>]+>", "", answer_text))
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        message_thread_id=thread_id,
+                        message_thread_id=send_thread_id,
                         text=plain_fallback[:3900],
                         reply_to_message_id=sent_msg.message_id,
                     )
@@ -347,7 +356,7 @@ async def _run_ask_flow(
             try:
                 sent_msg = await context.bot.send_message(
                     chat_id=chat_id,
-                    message_thread_id=thread_id,
+                    message_thread_id=send_thread_id,
                     text=answer_text,
                     parse_mode=ParseMode.HTML,
                     reply_to_message_id=update.message.message_id,
@@ -357,7 +366,7 @@ async def _run_ask_flow(
                 plain_fallback = html.unescape(re.sub(r"<[^>]+>", "", answer_text))
                 sent_msg = await context.bot.send_message(
                     chat_id=chat_id,
-                    message_thread_id=thread_id,
+                    message_thread_id=send_thread_id,
                     text=plain_fallback[:3900],
                     reply_to_message_id=update.message.message_id,
                 )
@@ -409,24 +418,25 @@ async def _run_ask_flow(
             logger.warning("Failed to archive /ask exchange: %s", log_err)
 
     except asyncio.TimeoutError:
+        _stop_action_pulse()
         logger.warning("Timed out handling AI chat request for chat %s", chat_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            message_thread_id=thread_id,
+            message_thread_id=send_thread_id,
             text="⏳ That request timed out waiting on the AI model — please try again!",
             reply_to_message_id=update.message.message_id,
         )
     except Exception as e:
+        _stop_action_pulse()
         logger.error("Error handling AI chat response: %s", e, exc_info=True)
         await context.bot.send_message(
             chat_id=chat_id,
-            message_thread_id=thread_id,
+            message_thread_id=send_thread_id,
             text="My connection is experiencing interference right now. Please try again in a moment.",
             reply_to_message_id=update.message.message_id,
         )
     finally:
-        if typing_job:
-            typing_job.schedule_removal()
+        _stop_action_pulse()
 
 
 async def ask_cmd(update: Update, context: CallbackContext):
