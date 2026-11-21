@@ -64,7 +64,7 @@ from handlers.translation import (
     translate_callback,
 )
 from handlers.moderation import mute_cmd, unmute_cmd, kick_cmd, ban_cmd
-from handlers.ai_chat import ask_cmd
+from handlers.ai_chat import ask_cmd, reply_to_bot_cmd
 from handlers.time import time_cmd, settime_cmd
 from handlers.ping import ping_cmd
 from handlers.channel_link import set_channel_cmd
@@ -284,8 +284,17 @@ def main() -> None:
     application.add_handler(CommandHandler("kick", kick_cmd))
     application.add_handler(CommandHandler("ban", ban_cmd))
 
-    # AI Chat
+    # AI Chat (/ask command + direct replies to anything the bot says in group chats)
     application.add_handler(CommandHandler("ask", ask_cmd))
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & filters.REPLY
+            & ~filters.COMMAND
+            & ~filters.StatusUpdate.ALL,
+            reply_to_bot_cmd,
+        )
+    )
 
     # Time Features
     application.add_handler(CommandHandler("time", time_cmd))

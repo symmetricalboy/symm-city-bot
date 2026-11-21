@@ -40,7 +40,7 @@ SYMM_CITY_KNOWLEDGE = """
 5. Be *very* symmetrical.
 
 **symm.city Bot Features:**
-- **AI Assistant (/ask <question>)**: Powered by `gemini-4-neon` with a 250-message floating group chat context window, full chat archive search, continuous long-term member & community memories, and symm's Bluesky post archive.
+- **AI Assistant (/ask <question> or reply to the bot)**: Powered by `gemini-4-neon` with a 250-message floating group chat context window, full chat archive search, continuous long-term member & community memories, and symm's Bluesky post archive. Replying directly to any message from the bot continues the AI conversation automatically.
 - **CXP System (Community XP)**: Earn 50 CXP per chat message (1 min cooldown). Positive emoji reactions give +50 CXP; negative emoji reactions give -50 CXP. Higher-level members have higher reaction multipliers!
 - **Level Titles**: Budding Symmetry (1-4), Bilateral Balance (5-9), Rotational Harmony (10-19), Crystalline Order (20-29), Exquisitely Symmetrical (30-39), Supersymmetric (40-49), Very Symmetrical (50-59), Pure Symmetry (60+).
 - **CXP Commands**: `/level` (view stats & rank), `/history` (view CXP history charts, high/low points, and breakdowns across messages, reactions, gambling, stealing, trivia, and admin gives for any user or timeframe), `/leaderboard` (top community members), `/contest` (active event rankings), `/steal` (attempt to steal 25-100 CXP from a random member, 1hr cooldown), `/gamble <amount>` (5-line CXP slot machine, 1hr cooldown), `/question` (DM bot to create CXP trivia questions) & `/answer <guess>` (answer active trivia).

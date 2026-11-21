@@ -776,12 +776,19 @@ class MemoryEngine:
         profiles_by_id = {int(p["user_id"]): p for p in all_profiles}
 
         focus_user_ids: list[int] = [asker_id]
-        if reply_context and reply_context.get("author_id"):
+        if (
+            reply_context
+            and reply_context.get("author_id")
+            and not reply_context.get("is_self_bot")
+        ):
             rid = int(reply_context["author_id"])
             if rid not in focus_user_ids:
                 focus_user_ids.append(rid)
 
-        q_lower = clean_q.lower()
+        mention_haystack = clean_q.lower()
+        if reply_context and reply_context.get("text"):
+            mention_haystack += " " + str(reply_context["text"][:400]).lower()
+
         for prof in all_profiles:
             uid = int(prof["user_id"])
             if uid in focus_user_ids:
@@ -793,7 +800,7 @@ class MemoryEngine:
                 json.loads(raw_al) if isinstance(raw_al, str) else (raw_al or [])
             )
             candidates = [c for c in [cname, uname, *[str(a).lower() for a in aliases]] if len(c) >= 3]
-            if any(c in q_lower for c in candidates):
+            if any(c in mention_haystack for c in candidates):
                 focus_user_ids.append(uid)
 
         # 4. Hybrid memory retrieval (keyword inverted index + gemini-embedding-2 pgvector)
@@ -1039,10 +1046,16 @@ OUTPUT FORMATTING RULES (STRICT):
         asker_handle = f" (@{asker_username})" if asker_username else ""
         reply_block = ""
         if reply_context and reply_context.get("text"):
-            reply_block = (
-                f"\n[Directly replying to message #{reply_context.get('message_id')} "
-                f"from {reply_context.get('author_name')}: \"{reply_context['text']}\"]\n"
-            )
+            if reply_context.get("is_self_bot"):
+                reply_block = (
+                    f"\n[Directly replying to YOUR (symm.city bot's) message #{reply_context.get('message_id')}: "
+                    f"\"{reply_context['text']}\"]\n"
+                )
+            else:
+                reply_block = (
+                    f"\n[Directly replying to message #{reply_context.get('message_id')} "
+                    f"from {reply_context.get('author_name')}: \"{reply_context['text']}\"]\n"
+                )
 
         user_prompt = (
             f"Asking Member: {asker_name}{asker_handle} [user_id={asker_id} | Level {asker_lvl} ({asker_tag}) | {asker_cxp:,} CXP{asker_loc}]"

@@ -27,7 +27,8 @@ A powerful, modular Telegram bot designed for the **symm.city** community. Built
 - **Contests**: Admins can use `/setcontest` to define a specific date range for special events, trackable via `/contest`.
 - **Mini-Games & Trivia**: Users can use `/steal` to attempt to steal up to 25-100 CXP from a random user with available CXP (1-hour cooldown), `/gamble <amount>` to spin the CXP slot machine (1-hour cooldown, with payouts and odds scaling with bet size), or DM `/question` to host CXP trivia questions in the group (`/answer`, `/cancel`).
 
-### 🤖 Continual-Memory AI Assistant (`/ask`)
+### 🤖 Continual-Memory AI Assistant (`/ask` & Direct Replies)
+- **Seamless Reply Conversations**: Members can use `/ask <question>` or simply reply directly to *anything* the bot says (AI answers, slot spins, `/history` charts, translations, stats) to chat naturally.
 - **250-Message Floating Context Window**: Injects the ~250 most recent conversational messages from the group chat so `/ask` understands ongoing threads, jokes, and multi-turn replies.
 - **Continuous Long-Term Memory & Member Profiles**: Continuously digests group chat history into PostgreSQL (`group_chat_messages`, `user_memory_profiles`, `memory_documents`, `memory_keyword_index`, and `768`-dim `pgvector` embeddings via `gemini-embedding-2`), learning about members, projects, gear, and community lore over time.
 - **Agentic Archive Search & Bluesky Grounding**: Uses `gemini-4-neon` via the Interactions API with live database tools (`search_chat_history`, `get_member_memories`, `remember_fact`) plus BM25 retrieval over symmetricalboy's Bluesky post archive.

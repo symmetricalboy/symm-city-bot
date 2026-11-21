@@ -57,7 +57,7 @@ async def commands_cmd(update: Update, context: CallbackContext):
         "• `/answer <guess>` — Pay the guess fee to answer the active trivia question (or `/answer` alone to view it).\n"
         "• `/cancel` — Cancel the active trivia question, refunding the prize to the asker while keeping paid guess fees (admins or question author only).\n\n"
         "**AI & Utilities:**\n"
-        "• `/ask <question>` — Chat with the Gemini 4 Neon AI assistant (remembers ongoing group conversations, member lore, & symm's projects; also works as a reply).\n"
+        "• `/ask <question>` — Chat with the Gemini 4 Neon AI assistant (or simply reply directly to anything the bot says!).\n"
         "• `/time <location | @username>` — Get the current time for a user or location (defaults to symm.city time).\n"
         "• `/settime <location>` — Set your personal local time zone/location.\n"
         "• `/rules` — View the community rules.\n"
